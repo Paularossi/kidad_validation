@@ -1,7 +1,7 @@
 #!/bin/bash
-# to run this script, first make it executable (only once): `chmod +x ./persistent/AI_validation/install2.sh`
-# then run it with `./persistent/AI_validation/install2.sh`
-
+# to run this script, first make it executable (only once): `chmod +x ./persistent/kidad-validation/install.sh`
+# then run it with `./persistent/kidad-validation/install.sh`
+# source install.sh
 echo "===== Setting up GPU workspace... ====="
 
 if [[ ! -z "${CONDA_DIR}" && ! -d "${CONDA_DIR}" ]] ; then
@@ -42,7 +42,7 @@ pip install --upgrade setuptools pip wheel
 python -m pip install -r requirements.txt
 
 # install the Transformers library with the version made for Gemma 3
-#pip install git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3
+pip install git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3
 
 # Add kidad-validation to PYTHONPATH
 if ! grep -q "PYTHONPATH=" ~/.bashrc; then

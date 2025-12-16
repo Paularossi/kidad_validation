@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 
 from huggingface_hub import login
-from transformers import AutoModelForImageTextToText, Gemma3ForConditionalGeneration, AutoProcessor, Qwen2_5_VLForConditionalGeneration
+from transformers import Gemma3ForConditionalGeneration, AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
 from questions import instructions, process_first_output
@@ -18,10 +18,10 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 TEXT_MODELS = ["google/gemma-3-12b-it"] # or the bigger one google/gemma-3-27b-it
 MULTIMODAL_MODELS = ["Qwen/Qwen2.5-VL-32B-Instruct"]
 
-image_folder = "data/screenshots 1"
+image_folder = "persistent/kidad-validation/data/screenshots 1"
 images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
 
-with open('keys.txt') as f:
+with open('persistent/kidad-validation/keys.txt') as f:
     json_data = json.load(f)
 
 hugg_key = json_data["huggingface"]
@@ -52,7 +52,7 @@ def initiate_transformers_model(model_id):
     return model, processor
 
 
-
+image = images[4]
 def start_classification_trns(model, processor, model_id, image):
 
     image_id = os.path.splitext(os.path.basename(image))[0]
