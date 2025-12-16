@@ -1,0 +1,7 @@
+# add files and folders to ignore: data/, keys.txt, __pycache__, .venv
+data/
+keys.txt
+__pycache__/
+.venv/
+.vscode/
+
