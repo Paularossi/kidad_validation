@@ -9,7 +9,7 @@ from huggingface_hub import login
 from transformers import Gemma3ForConditionalGeneration, AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-from questions import instructions, process_first_output
+from persistent.kidad_validation.screenshot_filtering.questions import instructions, process_first_output
 
 # use the GPU if available
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -18,10 +18,10 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 TEXT_MODELS = ["google/gemma-3-12b-it"] # or the bigger one google/gemma-3-27b-it
 MULTIMODAL_MODELS = ["Qwen/Qwen2.5-VL-32B-Instruct"]
 
-image_folder = "persistent/kidad-validation/data/screenshots 1"
+image_folder = "persistent/kidad_validation/data/screenshots 1"
 images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
 
-with open('persistent/kidad-validation/keys.txt') as f:
+with open('persistent/kidad_validation/keys.txt') as f:
     json_data = json.load(f)
 
 hugg_key = json_data["huggingface"]
@@ -62,10 +62,10 @@ def start_classification_trns(model, processor, model_id, image):
     base64_image = encode_image(image_path)
     image_url = f"data:image/jpeg;base64,{base64_image}"
     user_content = []
-    messages = [{"role": "system", "content": instructions}] # get the instructions
+    messages = [{"role": "system", "content": [{"type": "text", "text": instructions}]}] # get the instructions
 
     user_content.append({"type": "text", "text": f"ID: {image_id}"})
-    user_content.append({"type": "image_url", "image_url": f"data:image/png;base64,{base64_image}"} # Gemma
+    user_content.append({"type": "image", "url": f"data:image/png;base64,{base64_image}"} # Gemma
             if model_id.startswith("google") else {"type": "image", "image": image_path}) # qwen?
     messages.append({"role": "user", "content": user_content})
 
@@ -104,9 +104,13 @@ def start_classification_trns(model, processor, model_id, image):
         # Qwen requires trimming the input tokens before decoding
         generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generation)]
         response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        if isinstance(response, list):
+            response = response[0]
+
+        response = parse_qwen_json(response)
         print(response) 
     else:
-        response = processor.decode(generation[0][input_len:], skip_special_tokens=True) # for gemma and aya
+        response = processor.decode(generation[0][input_len:], skip_special_tokens=True) # for gemma
         print(response) 
 
     return response, response_time
@@ -129,7 +133,7 @@ def label_images(images, model_id):
             response, response_time = start_classification_trns(model, processor, model_id, image)
             responses.append(response)
 
-            dict_entry = process_first_output(json.loads(response))
+            dict_entry = process_first_output(json.loads(response) if model_id in TEXT_MODELS else response)
             dict_entry.update({"response_time": round(response_time, 2)})
         except Exception as e:
             print(f"Error processing image {image} due to: {e}.")
@@ -151,7 +155,7 @@ def label_images(images, model_id):
     return labeling_outputs, responses
 
 
-model_id = TEXT_MODELS[0]
+model_id = MULTIMODAL_MODELS[0]
 login(hugg_key) # log into hugging face (gated models like gemma)
 
 labeling_outputs, responses = label_images(images[0:10], model_id)

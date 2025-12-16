@@ -1,4 +1,5 @@
 import re
+import json
 
 instructions = """
     You are an expert in detecting advertisements in mobile social media screenshots. Return ONLY compact JSON on one line.
@@ -19,6 +20,13 @@ instructions = """
 
     Only include "ad_followup" when the label is AD; omit it otherwise. Classify the provided image. Be conservative with AD unless ad-specific signals are visible.
 """
+
+
+def parse_qwen_json(text: str):
+    # remove ```json ... ``` or ``` ... ```
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text.strip())
+    return json.loads(text)
 
 
 def process_first_output(response):
