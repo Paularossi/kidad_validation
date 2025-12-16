@@ -1,7 +1,7 @@
 import base64, json, os, time, requests, re
 import pandas as pd
 
-from questions import instructions
+from screenshot_filtering.questions import instructions
 
 image_folder = "data/screenshots 1"
 images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
