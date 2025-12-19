@@ -140,7 +140,7 @@ def group_screenshots_by_similarity(df, time_col="timestamp", emb_col="clip_emb"
     return df
 
 
-# generate dummy timestamps for the first 10 images
+# generate dummy timestamps
 files = sorted(images, key=extract_num)
 
 start_time = datetime(2025, 1, 1, 0, 0, 0)  # arbitrary
@@ -149,6 +149,22 @@ df = pd.DataFrame({
     "screenshot_path": [os.path.join(image_folder, f) for f in files],
     "timestamp": [start_time + timedelta(seconds=i * INTERVAL_SECONDS) for i in range(len(files))]
 })
+df['screenshot_id'] = df['screenshot_id'].astype(str)
+
+# reload the first filtering data
+labeling_outputs = pd.read_excel(f"data/{screenshot_set}_first_filtering.xlsx")
+labeling_outputs['id'] = labeling_outputs['id'].astype(str)
+
+# join with df to get timestamps
+labeling_outputs = labeling_outputs.merge(df, left_on='id', right_on='screenshot_id', how='left')
+labeling_outputs = labeling_outputs.drop(columns='screenshot_id')
+labeling_outputs = labeling_outputs.sort_values(by='timestamp').reset_index(drop=True)
+
+# get only the ads
+ads_only = labeling_outputs[labeling_outputs['label'] == 'AD']
+food_ads_only = ads_only[ads_only['food_ad'] == 'YES']
+ads_only = ads_only.reset_index(drop=True)
+food_ads_only = food_ads_only.reset_index(drop=True)
 
 # 1) compute CLIP embeddings and previous-frame similarities
 df_ads_emb = compute_clip_embeddings(df, image_col="screenshot_path", batch_size=32, model_name="openai/clip-vit-base-patch32")

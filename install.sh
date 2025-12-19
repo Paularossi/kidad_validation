@@ -1,7 +1,7 @@
 #!/bin/bash
-# to run this script, first make it executable (only once): `chmod +x ./persistent/kidad-validation/install.sh`
-# then run it with `./persistent/kidad-validation/install.sh`
-# source install.sh
+# to run this script, first make it executable (only once): `chmod +x install.sh`
+# then run it with `source install.sh`
+
 echo "===== Setting up GPU workspace... ====="
 
 if [[ ! -z "${CONDA_DIR}" && ! -d "${CONDA_DIR}" ]] ; then
