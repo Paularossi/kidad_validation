@@ -10,13 +10,15 @@ instructions = """
     - AD: a paid promotion or sponsored/boosted post/ad unit
     - NON_AD: organic content, comments, chats, menus, camera, inbox, reels grid, etc.
     - UNCERTAIN: not enough evidence
+    
+    For every screenshot, determine which social media platform it belongs to (Instagram, Facebook, TikTok, Snapchat, Twitter/X, etc., or UNKNOWN if unclear).
 
     If the screenshot is labelled as AD, also determine:
     - Whether the ad promotes food, beverages, or alcohol (YES, NO, or UNSURE).
     - Any recognizable brands shown (list every distinct brand name, or an empty list if none).
 
     Output format (strict JSON):
-    {"items":[{"id":"<id>","label":"AD|NON_AD|UNCERTAIN","confidence":0.0,"signals":["..."],"ad_followup":{"food_ad":"YES|NO|UNSURE","brands":["Brand"]}}]}
+    {"items":[{"id":"<id>","label":"AD|NON_AD|UNCERTAIN","platform":"Platform","confidence":0.0,"signals":["..."],"ad_followup":{"food_ad":"YES|NO|UNSURE","brands":["Brand"]}}]}
 
     Only include "ad_followup" when the label is AD; omit it otherwise. Classify the provided image. Be conservative with AD unless ad-specific signals are visible.
 """
@@ -39,12 +41,14 @@ def process_first_output(response):
     item = response["items"][0]
     signals = item.get("signals", [])
     label = item["label"]
+    platform = item["platform"]
     confidence = item["confidence"]
     ad_followup = item.get("ad_followup")
 
     result_entry = {
         "id": item["id"],
         "label": label,
+        "platform": platform,
         "confidence": confidence,
         "signals": signals
     }

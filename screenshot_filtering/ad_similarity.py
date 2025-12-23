@@ -139,7 +139,7 @@ def group_screenshots_by_similarity(df, time_col="timestamp", emb_col="clip_emb"
 
     return df
 
-
+screenshot_set = "screenshots 1"
 # generate dummy timestamps
 files = sorted(images, key=extract_num)
 
@@ -167,7 +167,7 @@ ads_only = ads_only.reset_index(drop=True)
 food_ads_only = food_ads_only.reset_index(drop=True)
 
 # 1) compute CLIP embeddings and previous-frame similarities
-df_ads_emb = compute_clip_embeddings(df, image_col="screenshot_path", batch_size=32, model_name="openai/clip-vit-base-patch32")
+df_ads_emb = compute_clip_embeddings(ads_only, image_col="screenshot_path", batch_size=32, model_name="openai/clip-vit-base-patch32")
 
 prev_sims = [np.nan]
 # compute cosine similarity to previous frame
@@ -175,7 +175,7 @@ for i in range(1, len(df_ads_emb)):
     prev_sims.append(float(np.dot(df_ads_emb.loc[i-1, "clip_emb"], df_ads_emb.loc[i, "clip_emb"])))
 
 df_ads_emb["prev_cosine_sim"] = prev_sims
-df_ads_emb[["screenshot_id", "timestamp", "prev_cosine_sim"]]
+df_ads_emb[["id", "timestamp", "prev_cosine_sim"]]
 
 
 # 2) group by similarity using CLIP + pHash + OCR

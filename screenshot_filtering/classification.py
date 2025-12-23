@@ -11,6 +11,8 @@ from qwen_vl_utils import process_vision_info
 
 from screenshot_filtering.questions import *
 
+# run this file in the terminal with `nohup python3 -m screenshot_filtering.classification`
+
 # use the GPU if available
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -19,10 +21,11 @@ TEXT_MODELS = ["google/gemma-3-12b-it"] # or the bigger one google/gemma-3-27b-i
 MULTIMODAL_MODELS = ["Qwen/Qwen2.5-VL-32B-Instruct"]
 
 screenshot_set = "screenshots 1"
-image_folder = "persistent/kidad_validation/data/screenshots 1"
+image_folder = "data/screenshots 1"
 images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
+images = sorted(images)
 
-with open('persistent/kidad_validation/keys.txt') as f:
+with open('keys.txt') as f:
     json_data = json.load(f)
 
 hugg_key = json_data["huggingface"]
@@ -146,7 +149,7 @@ def label_images(images, model_id):
 
     try:
         labeling_outputs = pd.DataFrame(results)
-        labeling_outputs['img_id'] = labeling_outputs['img_id'].astype(str)
+        labeling_outputs['id'] = labeling_outputs['id'].astype(str)
     except Exception as e:
         print(results)
         print(f"Unable to convert the output to a dataframe. Returning the data as it is.")
@@ -159,7 +162,7 @@ def label_images(images, model_id):
 model_id = MULTIMODAL_MODELS[0]
 login(hugg_key) # log into hugging face (gated models like gemma)
 
-labeling_outputs, responses = label_images(images[0:10], model_id)
+labeling_outputs, responses = label_images(images, model_id)
 print(labeling_outputs)
 
-labeling_outputs.to_excel(f"data/{screenshot_set}_first_filtering_{model_id}.xlsx", index=False)
+labeling_outputs.to_excel(f"data/{screenshot_set}_first_filtering_qwen.xlsx", index=False)
