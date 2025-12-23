@@ -139,50 +139,61 @@ def group_screenshots_by_similarity(df, time_col="timestamp", emb_col="clip_emb"
 
     return df
 
+
+def run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images, metadata = None):
+
+    if metadata is None:
+        # generate dummy timestamps
+        files = sorted(images, key=extract_num)
+
+        start_time = datetime(2025, 1, 1, 0, 0, 0)  # arbitrary
+        metadata = pd.DataFrame({
+            "screenshot_id": [os.path.splitext(f)[0] for f in files],
+            "screenshot_path": [os.path.join(image_folder, f) for f in files],
+            "timestamp": [start_time + timedelta(seconds=i * INTERVAL_SECONDS) for i in range(len(files))]
+        })
+        metadata['screenshot_id'] = metadata['screenshot_id'].astype(str)
+
+    # join with df to get timestamps
+    labeling_outputs = labeling_outputs.merge(metadata, left_on='id', right_on='screenshot_id', how='left')
+    labeling_outputs = labeling_outputs.drop(columns='screenshot_id')
+    labeling_outputs = labeling_outputs.sort_values(by='timestamp').reset_index(drop=True)
+
+    # get only the ads, but all ads, not just for food
+    ads_only = labeling_outputs[labeling_outputs['label'] == 'AD']
+    food_ads_only = ads_only[ads_only['food_ad'] == 'YES']
+    ads_only = ads_only.reset_index(drop=True)
+    food_ads_only = food_ads_only.reset_index(drop=True)
+
+    # calculate similarity for all ads, as some food ads might have been missed
+    # 1) compute CLIP embeddings and previous-frame similarities
+    df_ads_emb = compute_clip_embeddings(ads_only, image_col="screenshot_path", batch_size=32, model_name="openai/clip-vit-base-patch32")
+
+    prev_sims = [np.nan]
+    # compute cosine similarity to previous frame
+    for i in range(1, len(df_ads_emb)):
+        prev_sims.append(float(np.dot(df_ads_emb.loc[i-1, "clip_emb"], df_ads_emb.loc[i, "clip_emb"])))
+
+    df_ads_emb["prev_cosine_sim"] = prev_sims
+    df_ads_emb[["id", "timestamp", "prev_cosine_sim"]]
+
+
+    # 2) group by similarity using CLIP + pHash + OCR
+    df_ads_emb = df_ads_emb.sort_values("timestamp").reset_index(drop=True)
+    df_ads_emb = add_ocr_tokens_tesseract(df_ads_emb, lang="eng+fra+nld", psm=6)
+    df_ads_emb_ocr = group_screenshots_by_similarity(df_ads_emb, time_col="timestamp", emb_col="clip_emb", path_col="screenshot_path",
+                                                    time_threshold_s=6.0, sim_threshold=0.75, phash_dist_threshold=12, hash_size=16,
+                                                    ocr_col="ocr_tokens", ocr_threshold=0.25, use_ocr=True)
+
+    df_ads_emb_ocr.to_excel(f"data/{screenshot_set}_ad_groups_{model_name}.xlsx", index=False)
+
+
+
+# load the first filtering data for a screenshot set for a model
 screenshot_set = "screenshots 1"
-# generate dummy timestamps
-files = sorted(images, key=extract_num)
-
-start_time = datetime(2025, 1, 1, 0, 0, 0)  # arbitrary
-df = pd.DataFrame({
-    "screenshot_id": [os.path.splitext(f)[0] for f in files],
-    "screenshot_path": [os.path.join(image_folder, f) for f in files],
-    "timestamp": [start_time + timedelta(seconds=i * INTERVAL_SECONDS) for i in range(len(files))]
-})
-df['screenshot_id'] = df['screenshot_id'].astype(str)
-
-# reload the first filtering data
-labeling_outputs = pd.read_excel(f"data/{screenshot_set}_first_filtering.xlsx")
+model_name = "qwen"
+labeling_outputs = pd.read_excel(f"data/{screenshot_set}_first_filtering_{model_name}.xlsx")
 labeling_outputs['id'] = labeling_outputs['id'].astype(str)
 
-# join with df to get timestamps
-labeling_outputs = labeling_outputs.merge(df, left_on='id', right_on='screenshot_id', how='left')
-labeling_outputs = labeling_outputs.drop(columns='screenshot_id')
-labeling_outputs = labeling_outputs.sort_values(by='timestamp').reset_index(drop=True)
+run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images)
 
-# get only the ads
-ads_only = labeling_outputs[labeling_outputs['label'] == 'AD']
-food_ads_only = ads_only[ads_only['food_ad'] == 'YES']
-ads_only = ads_only.reset_index(drop=True)
-food_ads_only = food_ads_only.reset_index(drop=True)
-
-# 1) compute CLIP embeddings and previous-frame similarities
-df_ads_emb = compute_clip_embeddings(ads_only, image_col="screenshot_path", batch_size=32, model_name="openai/clip-vit-base-patch32")
-
-prev_sims = [np.nan]
-# compute cosine similarity to previous frame
-for i in range(1, len(df_ads_emb)):
-    prev_sims.append(float(np.dot(df_ads_emb.loc[i-1, "clip_emb"], df_ads_emb.loc[i, "clip_emb"])))
-
-df_ads_emb["prev_cosine_sim"] = prev_sims
-df_ads_emb[["id", "timestamp", "prev_cosine_sim"]]
-
-
-# 2) group by similarity using CLIP + pHash + OCR
-df_ads_emb = df_ads_emb.sort_values("timestamp").reset_index(drop=True)
-df_ads_emb = add_ocr_tokens_tesseract(df_ads_emb, lang="eng+fra+nld", psm=6)
-df_ads_emb_ocr = group_screenshots_by_similarity(df_ads_emb, time_col="timestamp", emb_col="clip_emb", path_col="screenshot_path",
-                                                 time_threshold_s=6.0, sim_threshold=0.75, phash_dist_threshold=12, hash_size=16,
-                                                 ocr_col="ocr_tokens", ocr_threshold=0.25, use_ocr=True)
-
-df_ads_emb_ocr.to_excel("data/screenshots1_ad_groups_ocr.xlsx", index=False)
