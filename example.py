@@ -47,7 +47,7 @@ def apply_ocr_fallback(image_path, result):
     return result
 
 
-def qwen_call(model, processor, model_id, image):
+def qwen_call(model, processor, model_id, image, image_folder):
 
     image_id = os.path.splitext(os.path.basename(image))[0]
     print(f'======== Labeling image: {image_id}. ========\n')
@@ -86,6 +86,7 @@ def qwen_call(model, processor, model_id, image):
 
     response = parse_qwen_json(response)
     print(response)
+    return response
 
 
 def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
@@ -132,8 +133,33 @@ def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
     return response
 
 
-def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
+def _call_with_retry(fn, *args, max_retries=3, base_delay=5.0, **kwargs):
+    """Call fn(*args, **kwargs) with exponential-backoff retry on failure."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.0f}s...")
+            time.sleep(delay)
 
+
+def filter_ads(media, model_id, api_key=None, api_url=None, images=True,
+               image_folder=None, checkpoint_path=None):
+    """Filter ads from a list of images or videos using the Qwen3 VL model.
+
+    Args:
+        media: List of image filenames (when images=True) or video paths.
+        model_id: HuggingFace model ID to use.
+        api_key: Unused placeholder for API-based future models.
+        api_url: Unused placeholder for API-based future models.
+        images: True to process still images, False to process video clips.
+        image_folder: Directory containing the image files (required when images=True).
+        checkpoint_path: Optional path to an Excel file for checkpoint saving/resuming.
+                         If the file exists, already-processed IDs are skipped.
+    """
     login(hugg_key)
 
     # initiate the right model
@@ -143,17 +169,33 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
     processor = AutoProcessor.from_pretrained(model_id)
     print(f"Successfully loaded model and processor with id {model_id}.")
 
-    results = [] # for the labels
+    # load checkpoint if available
+    results = []
     responses = []
+    processed_ids = set()
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint_df = pd.read_excel(checkpoint_path)
+        results = checkpoint_df.to_dict(orient="records")
+        processed_ids = set(checkpoint_df["id"].astype(str).tolist())
+        print(f"Resumed from checkpoint: {len(processed_ids)} items already processed.")
+
     n = 1
 
     for med in media:
-        print(f"Processing {"image" if images else "video"} {n}/{len(media)}: {med}")
+        med_id = os.path.splitext(os.path.basename(med))[0]
+        if med_id in processed_ids:
+            print(f"Skipping already-processed {'image' if images else 'video'}: {med_id}")
+            n += 1
+            continue
+
+        print(f"Processing {'image' if images else 'video'} {n}/{len(media)}: {med}")
         try:
             if images:
-                response = qwen_call(model, processor, model_id, med)
-            else: 
-                response = qwen_call_video(model, processor, model_id, med)
+                if image_folder is None:
+                    raise ValueError("image_folder must be provided when images=True")
+                response = _call_with_retry(qwen_call, model, processor, model_id, med, image_folder)
+            else:
+                response = _call_with_retry(qwen_call_video, model, processor, model_id, med)
             responses.append(response)
             item = response["items"][0]
             signals = item.get("signals", [])
@@ -185,13 +227,17 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
                 results[-1]["confidence"] = confidence_new
 
         except Exception as e:
-            print(f"Error processing {"image" if images else "video"} {med}: {e}")
+            print(f"Error processing {'image' if images else 'video'} {med}: {e}")
             results.append({
-                "id": os.path.splitext(os.path.basename(med))[0],
+                "id": med_id,
                 "label": "UNCERTAIN",
                 "confidence": 0.0,
                 "signals": [f"Error: {str(e)}"]
             })
+
+        # save checkpoint after every item
+        if checkpoint_path:
+            pd.DataFrame(results).to_excel(checkpoint_path, index=False)
 
         n += 1
         time.sleep(1) # to avoid rate limiting
@@ -201,54 +247,56 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
     return labeling_outputs, responses
 
 
-# start from here
-image_folder = "kidad/data/test_images"
-video_folder = "kidad/data/videos"
-images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
-images = sorted(images)
+if __name__ == "__main__":
+    # start from here
+    image_folder = "kidad/data/test_images"
+    video_folder = "kidad/data/videos"
+    images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    images = sorted(images)
 
 
-# ============================================================================
-# TEST STEP - CONVERT INTO VIDEOS
-# read metadata
-metadata = pd.read_excel("kidad/data/metadata.xlsx")
-metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")] # remove test accounts
+    # ============================================================================
+    # TEST STEP - CONVERT INTO VIDEOS
+    # read metadata
+    metadata = pd.read_excel("kidad/data/metadata.xlsx")
+    metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")] # remove test accounts
 
-metadata['enrol_number'].value_counts() # check the counts, idk why they are all different
+    metadata['enrol_number'].value_counts() # check the counts, idk why they are all different
 
-# take a random participant for testing
-meta_test = metadata[metadata['enrol_number'] == 23841529678]
-meta_test = meta_test.sort_values(by='Time')
+    # take a random participant for testing
+    meta_test = metadata[metadata['enrol_number'] == 23841529678]
+    meta_test = meta_test.sort_values(by='Time')
 
-meta_test['AppId'].value_counts()
-meta_test = meta_test[meta_test['AppId'].str.contains("musically", case=False, na=False)]
-meta_test = meta_test.head(300) # just a test sample
-meta_test['Time'] = pd.to_datetime(meta_test['Time'])
-meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0) # find the time delta between screenshots
-meta_test["image"] = meta_test["image"].astype(str)
-meta_test = meta_test.sort_values(by='Time')
-id_to_ts = dict(zip(meta_test["image"], meta_test["Time"]))
+    meta_test['AppId'].value_counts()
+    meta_test = meta_test[meta_test['AppId'].str.contains("musically", case=False, na=False)]
+    meta_test = meta_test.head(300) # just a test sample
+    meta_test['Time'] = pd.to_datetime(meta_test['Time'])
+    meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0) # find the time delta between screenshots
+    meta_test["image"] = meta_test["image"].astype(str)
+    meta_test = meta_test.sort_values(by='Time')
+    id_to_ts = dict(zip(meta_test["image"], meta_test["Time"]))
 
-images_list = meta_test['image'].tolist()
-images_list = [f"{image}.png" for image in images_list]
-meta_images = [image for image in images if image in images_list]
-meta_images = [os.path.join(image_folder, f) for f in meta_images]
+    images_list = meta_test['image'].tolist()
+    images_list = [f"{image}.png" for image in images_list]
+    meta_images = [image for image in images if image in images_list]
+    meta_images = [os.path.join(image_folder, f) for f in meta_images]
 
-videos = screenshots_to_videos(meta_images=meta_images, id_to_ts=id_to_ts, output_folder=video_folder, window_minutes = 10.0)
+    videos = screenshots_to_videos(meta_images=meta_images, id_to_ts=id_to_ts, output_folder=video_folder, window_minutes = 10.0)
 
 
-# ============================================================================
-# the steps for doing the analysis:
-# 1. filter ads from non-ads
-#results, responses = filter_ads(images[0:10], MODEL) # for all images
+    # ============================================================================
+    # the steps for doing the analysis:
+    # 1. filter ads from non-ads
+    #results, responses = filter_ads(images[0:10], MODEL, image_folder=image_folder) # for all images
 
-# 2. build ad groups (based on screenshot similarity)
-#group_metadata = pd.read_excel(f"data/{screenshot_set}_ad_groups_{MODEL}.xlsx")
+    # 2. build ad groups (based on screenshot similarity)
+    #group_metadata = pd.read_excel(f"data/{screenshot_set}_ad_groups_{MODEL}.xlsx")
 
-#image_groups, images = build_ad_groups(group_metadata, images, image_folder)
+    #image_groups, images = build_ad_groups(group_metadata, images, image_folder)
 
-# 3. annotate them using qwen for the same questions as AI validation
+    # 3. annotate them using qwen for the same questions as AI validation
 
-# === USE VIDEOS ===
-results, responses = filter_ads(media=videos["video_path"].tolist(), model_id=MODEL, images = False)
+    # === USE VIDEOS ===
+    results, responses = filter_ads(media=videos["video_path"].tolist(), model_id=MODEL, images=False,
+                                    checkpoint_path="kidad/data/filter_ads_checkpoint.xlsx")
 
