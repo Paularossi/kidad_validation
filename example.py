@@ -1,4 +1,4 @@
-import base64, json, os, time, requests, re
+import json, os, time, re
 import pandas as pd
 
 from kidad.screenshot_filtering.questions import * # when running from the dsri use kidad.
@@ -88,10 +88,10 @@ def qwen_call(model, processor, model_id, image):
     print(response)
 
 
-def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
+def qwen_call_video(model, processor, model_id, video_frames, model_fps = 0.7):
 
-    video_id = os.path.splitext(os.path.basename(video))[0]
-    print(f'======== Labeling clip: {video_id}. ========\n')
+    video_id = video_frames["clip_id"]
+    print(f'======== Labeling clip: {video_id} ({len(frames)} frames). ========\n')
 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
@@ -99,7 +99,9 @@ def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
             {"type": "text", "text": f"ID: {video_id}"},
             {
                 "type": "video",
-                "video": video
+                "video": video_frames["frames"],
+                "sample_fps": 1,
+                "raw_fps": 1,
             },
         ]}
     ]
@@ -115,7 +117,7 @@ def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
 
     start_time = time.time()
     with torch.inference_mode():
-        generation = model.generate(**inputs, max_new_tokens=800, do_sample=False)
+        generation = model.generate(**inputs, max_new_tokens=1500, do_sample=False)
 
     end_time = time.time()
     response_time = end_time - start_time
@@ -129,7 +131,7 @@ def qwen_call_video(model, processor, model_id, video, model_fps = 0.7):
 
     response = parse_qwen_json(response)
     print(response)
-    return response
+    return response, response_time
 
 
 def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
@@ -148,12 +150,12 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
     n = 1
 
     for med in media:
-        print(f"Processing {"image" if images else "video"} {n}/{len(media)}: {med}")
+        print(f"Processing {"image" if images else "video"} {n}/{len(media)}")
         try:
             if images:
                 response = qwen_call(model, processor, model_id, med)
             else: 
-                response = qwen_call_video(model, processor, model_id, med)
+                response, response_time = qwen_call_video(model, processor, model_id, med)
             responses.append(response)
             item = response["items"][0]
             signals = item.get("signals", [])
@@ -165,7 +167,12 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
                 "id": item["id"],
                 "label": label,
                 "confidence": confidence,
-                "signals": signals
+                "signals": signals,
+                "response_time": NULL if images else round(response_time, 2),
+                "n_frames": med["n_frames"],
+                "start_time": med["start_time"],
+                "end_time": med["end_time"],
+                "screenshot_paths": med["screenshot_paths"],
             }
 
             if isinstance(ad_followup, dict):
@@ -176,18 +183,18 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
             results.append(result_entry)
 
             # check for ad keywords in signals
-            if any(AD_KEYWORDS.search(signal) for signal in signals):
-                label_new = "AD"
-                confidence_new = max(confidence, 0.8) # boost confidence if ad keywords are found
+            # if any(AD_KEYWORDS.search(signal) for signal in signals):
+            #     label_new = "AD"
+            #     confidence_new = max(confidence, 0.8) # boost confidence if ad keywords are found
                 
-                # add the new label and confidence to the results
-                results[-1]["label"] = label_new
-                results[-1]["confidence"] = confidence_new
+            #     # add the new label and confidence to the results
+            #     results[-1]["label"] = label_new
+            #     results[-1]["confidence"] = confidence_new
 
         except Exception as e:
             print(f"Error processing {"image" if images else "video"} {med}: {e}")
             results.append({
-                "id": os.path.splitext(os.path.basename(med))[0],
+                "id": med if images else med["clip_id"],
                 "label": "UNCERTAIN",
                 "confidence": 0.0,
                 "signals": [f"Error: {str(e)}"]
@@ -217,12 +224,13 @@ metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")] 
 metadata['enrol_number'].value_counts() # check the counts, idk why they are all different
 
 # take a random participant for testing
-meta_test = metadata[metadata['enrol_number'] == 23841529678]
+enrol_test_nr = 23841529678
+meta_test = metadata[metadata['enrol_number'] == enrol_test_nr]
 meta_test = meta_test.sort_values(by='Time')
 
 meta_test['AppId'].value_counts()
-meta_test = meta_test[meta_test['AppId'].str.contains("musically", case=False, na=False)]
-meta_test = meta_test.head(300) # just a test sample
+meta_test = meta_test[meta_test['AppId'].str.contains("musically", case=False, na=False)] # tiktok
+#meta_test = meta_test.head(300) # just a test sample
 meta_test['Time'] = pd.to_datetime(meta_test['Time'])
 meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0) # find the time delta between screenshots
 meta_test["image"] = meta_test["image"].astype(str)
@@ -234,8 +242,20 @@ images_list = [f"{image}.png" for image in images_list]
 meta_images = [image for image in images if image in images_list]
 meta_images = [os.path.join(image_folder, f) for f in meta_images]
 
-videos = screenshots_to_videos(meta_images=meta_images, id_to_ts=id_to_ts, output_folder=video_folder, window_minutes = 10.0)
+#videos = screenshots_to_videos(meta_images=meta_images, id_to_ts=id_to_ts, output_folder=video_folder, window_minutes = 10.0)
 
+# alternatively, don't convert to videos at all and just pass the screenshots as frames
+frames = group_screenshots(meta_images, id_to_ts, window_minutes=10.0)
+frames_df = pd.DataFrame(frames)
+frames_df["start_time"] = frames_df["start_time"].dt.tz_localize(None)
+frames_df["end_time"] = frames_df["end_time"].dt.tz_localize(None)
+frames_df.to_excel("kidad/data/frames_test.xlsx")
+
+results, responses = filter_ads(media=frames, model_id=MODEL, images=False)
+
+results["start_time"] = results["start_time"].dt.tz_localize(None)
+results["end_time"] = results["end_time"].dt.tz_localize(None)
+results.to_excel(f"kidad/data/test_results_{str(enrol_test_nr)}.xlsx")
 
 # ============================================================================
 # the steps for doing the analysis:
@@ -249,6 +269,15 @@ videos = screenshots_to_videos(meta_images=meta_images, id_to_ts=id_to_ts, outpu
 
 # 3. annotate them using qwen for the same questions as AI validation
 
-# === USE VIDEOS ===
-results, responses = filter_ads(media=videos["video_path"].tolist(), model_id=MODEL, images = False)
 
+
+# === TO CREATE A TEST IMAGE SET
+# all_images = "data/All_images"
+# write the test images mentioned in images_list, from all_images to image_folder
+# os.mkdir(image_folder) if not os.path.exists(image_folder) else None
+
+# for image in images_list:
+#     src = os.path.join(all_images, os.path.basename(image))
+#     dst = os.path.join(image_folder, os.path.basename(image))
+#     if not os.path.exists(dst):
+#         shutil.copy(src, dst)

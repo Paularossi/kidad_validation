@@ -102,3 +102,40 @@ def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes =
     print(f"\nDone. {len(clips)} clips written to {output_folder}")
  
     return clips_df
+
+
+def group_screenshots(meta_images, id_to_ts, window_minutes = 10.0):
+    """
+    Group screenshots into time windows and return lists of PIL images (frames are passed directly to Qwen)
+    """
+    # build (path, timestamp) list sorted by time
+    timed = []
+    for p in meta_images:
+        sid = os.path.splitext(os.path.basename(p))[0]
+        if sid in id_to_ts:
+            timed.append((p, pd.to_datetime(id_to_ts[sid])))
+    timed.sort(key=lambda x: x[1])
+
+    window_seconds = window_minutes * 60.0
+    t_start = timed[0][1]
+    windows = []
+    i = 0
+
+    while i < len(timed):
+        window_end = t_start + timedelta(seconds=window_seconds)
+        batch = []
+        while i < len(timed) and timed[i][1] < window_end:
+            batch.append(timed[i])
+            i += 1
+        if batch:
+            windows.append({
+                "clip_id": f"clip_{len(windows):04d}_{batch[0][1].strftime('%H%M%S')}_{batch[-1][1].strftime('%H%M%S')}",
+                "start_time": batch[0][1],
+                "end_time": batch[-1][1],
+                "n_frames": len(batch),
+                "frames": [Image.open(p).convert("RGB") for p, _ in batch],  # just PIL images, no timestamps needed
+                "screenshot_paths": [p for p, _ in batch],
+            })
+        t_start = window_end
+
+    return windows
