@@ -153,8 +153,8 @@ def filter_ads(media, model_id, api_key=None, api_url=None, images=True,
     Args:
         media: List of image filenames (when images=True) or video paths.
         model_id: HuggingFace model ID to use.
-        api_key: Unused placeholder for API-based future models.
-        api_url: Unused placeholder for API-based future models.
+        api_key: Reserved for future API-based model integration.
+        api_url: Reserved for future API-based model integration.
         images: True to process still images, False to process video clips.
         image_folder: Directory containing the image files (required when images=True).
         checkpoint_path: Optional path to an Excel file for checkpoint saving/resuming.
@@ -287,7 +287,8 @@ if __name__ == "__main__":
     # ============================================================================
     # the steps for doing the analysis:
     # 1. filter ads from non-ads
-    #results, responses = filter_ads(images[0:10], MODEL, image_folder=image_folder) # for all images
+    #results, responses = filter_ads(images[0:10], MODEL, image_folder=image_folder,
+    #                                checkpoint_path="kidad/data/filter_images_checkpoint.xlsx")
 
     # 2. build ad groups (based on screenshot similarity)
     #group_metadata = pd.read_excel(f"data/{screenshot_set}_ad_groups_{MODEL}.xlsx")

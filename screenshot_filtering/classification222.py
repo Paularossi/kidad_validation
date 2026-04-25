@@ -166,7 +166,7 @@ def label_images(images, model_id, image_folder, checkpoint_path=None):
             responses.append(response)
 
             answer_dict = process_missing_output(response, expected_labels)
-            dict_entry = get_final_dict_entry(answer_dict, image)
+            dict_entry = get_final_dict_entry(answer_dict, image_id)
             dict_entry.update({"response_time": round(response_time, 2)})
         except Exception as e:
             print(f"Error processing image {image} due to: {e}.")

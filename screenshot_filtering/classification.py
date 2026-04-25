@@ -21,6 +21,7 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 TEXT_MODELS = ["google/gemma-3-12b-it"] # or the bigger one google/gemma-3-27b-it
 MULTIMODAL_MODELS = ["Qwen/Qwen2.5-VL-32B-Instruct"]
 
+# ad disclosure keywords: English, Dutch (gesponsord/advertentie), French (publicité)
 AD_KEYWORDS = re.compile(r"(sponsored|promoted|gesponsord|advertentie|publicité)", re.I)
 
 
