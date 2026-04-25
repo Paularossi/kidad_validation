@@ -59,10 +59,53 @@ instructions_video = """
 
 
 def parse_qwen_json(text: str):
-    # remove ```json ... ``` or ``` ... ```
+    # remove ```json ... ``` or ``` ... ``` fences
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text.strip())
-    return json.loads(text)
+    text = text.strip()
+
+    # try a direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # fall back: find the outermost JSON object or array using a stack-based bracket matcher
+    for open_char, close_char in [('{', '}'), ('[', ']')]:
+        start = text.find(open_char)
+        if start == -1:
+            continue
+        depth = 0
+        end = -1
+        in_string = False
+        escape_next = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    end = idx
+                    break
+        if end != -1:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                continue
+
+    raise ValueError(f"Could not extract valid JSON from model response: {text[:200]!r}")
 
 
 def process_first_output(response):

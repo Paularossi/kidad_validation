@@ -40,6 +40,10 @@ def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes =
     timed.sort(key=lambda x: x[1])
  
     print(f"Loaded {len(timed)} screenshots. Window: {window_minutes} min.")
+
+    if not timed:
+        print("No screenshots matched the provided timestamps. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["video_path", "clip_index", "start_time", "end_time", "n_frames", "screenshot_paths"])
  
     # get output resolution from first image 
     first_img = Image.open(timed[0][0]).convert("RGB")

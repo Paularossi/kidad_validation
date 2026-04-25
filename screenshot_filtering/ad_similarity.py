@@ -11,10 +11,6 @@ from transformers import CLIPProcessor, CLIPModel
 from screenshot_filtering.helpers import *
 
 INTERVAL_SECONDS = 2
-image_folder = "data/screenshots 1"
-images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
-
-pytesseract.pytesseract.tesseract_cmd = 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'
 
 
 # load CLIP model + processor for image embeddings
@@ -140,7 +136,7 @@ def group_screenshots_by_similarity(df, time_col="timestamp", emb_col="clip_emb"
     return df
 
 
-def run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images, metadata = None):
+def run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images, image_folder, metadata=None):
 
     if metadata is None:
         # generate dummy timestamps
@@ -188,12 +184,14 @@ def run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images
     df_ads_emb_ocr.to_excel(f"data/{screenshot_set}_ad_groups_{model_name}.xlsx", index=False)
 
 
+if __name__ == "__main__":
+    image_folder = "data/screenshots 1"
+    images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
 
-# load the first filtering data for a screenshot set for a model
-screenshot_set = "screenshots 1"
-model_name = "qwen"
-labeling_outputs = pd.read_excel(f"data/{screenshot_set}_first_filtering_{model_name}.xlsx")
-labeling_outputs['id'] = labeling_outputs['id'].astype(str)
+    # load the first filtering data for a screenshot set for a model
+    screenshot_set = "screenshots 1"
+    model_name = "qwen"
+    labeling_outputs = pd.read_excel(f"data/{screenshot_set}_first_filtering_{model_name}.xlsx")
+    labeling_outputs['id'] = labeling_outputs['id'].astype(str)
 
-run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images)
-
+    run_similarity_analysis(screenshot_set, labeling_outputs, model_name, images, image_folder)

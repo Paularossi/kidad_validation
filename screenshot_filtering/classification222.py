@@ -23,21 +23,24 @@ MULTIMODAL_MODELS = ["Qwen/Qwen2.5-VL-32B-Instruct"]
 all_questions = [alcohol, type_ad, marketing_str, premium_offer, who_cat, target_age_group]
 expected_labels = [label for section in all_questions for (label, _) in section] + ['SPECULATION_LEVEL'] # all question labels
 
-screenshot_set = "screenshots 1"
-image_folder = f"data/{screenshot_set}" 
-images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
-
-# read the keys
-with open('keys.txt') as f:
-    json_data = json.load(f)
-
-hugg_key = json_data["huggingface"]
-
 
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
+
+
+def _call_with_retry(fn, *args, max_retries=3, base_delay=5.0, **kwargs):
+    """Call fn(*args, **kwargs) with exponential-backoff retry on failure."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.0f}s...")
+            time.sleep(delay)
 
 
 # =============== Transformers ===============
@@ -62,7 +65,7 @@ def initiate_transformers_model(model_id):
     return model, processor
 
 
-def start_classification_trns(model, processor, model_id, image):
+def start_classification_trns(model, processor, model_id, image, image_folder):
 
     image_id = os.path.splitext(os.path.basename(image))[0]
     print(f'======== Labeling image: {image_id}. ========\n')
@@ -99,8 +102,7 @@ def start_classification_trns(model, processor, model_id, image):
     start_time = time.time()
     # generate the response (regardless the model)
     with torch.inference_mode(): # optimize inference by disabling gradient calculations to save memory and speed up processing
-        generation = model.generate(**inputs, max_new_tokens=1300, do_sample=False, # deterministic generation (not random)
-            temperature = 0.1)
+        generation = model.generate(**inputs, max_new_tokens=1300, do_sample=False) # deterministic generation (not random)
 
     end_time = time.time()
     response_time = end_time - start_time
@@ -122,31 +124,63 @@ def start_classification_trns(model, processor, model_id, image):
     return response, response_time
 
 
-def label_images(images, model_id):
-    
+def label_images(images, model_id, image_folder, checkpoint_path=None):
+    """Classify a list of images with WHO-category questions using the specified model.
+
+    Args:
+        images: List of image filenames (without directory prefix).
+        model_id: HuggingFace model ID.
+        image_folder: Directory containing the image files.
+        checkpoint_path: Optional path to an Excel file for checkpoint saving/resuming.
+                         If the file exists, already-processed IDs are skipped.
+    """
     model, processor = initiate_transformers_model(model_id)
     if model is None:
         print(f"Error loading the model {model_id}. Quitting...")
         return None
     print(f"Starting classifying {len(images)} images with model {model_id}...")
-    
-    results = [] # for the labels
+
+    # load checkpoint if available
+    results = []
     responses = []
+    processed_ids = set()
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint_df = pd.read_excel(checkpoint_path)
+        results = checkpoint_df.to_dict(orient="records")
+        processed_ids = set(checkpoint_df["img_id"].astype(str).tolist())
+        print(f"Resumed from checkpoint: {len(processed_ids)} items already processed.")
+
     n = 1 # just to count the images
     
     for image in images:
+        image_id = os.path.splitext(os.path.basename(image))[0]
+        if image_id in processed_ids:
+            print(f"Skipping already-processed image: {image_id}")
+            n += 1
+            continue
+
         try:
-            response, response_time = start_classification_trns(model, processor, model_id, image)
+            response, response_time = _call_with_retry(
+                start_classification_trns, model, processor, model_id, image, image_folder
+            )
             responses.append(response)
 
             answer_dict = process_missing_output(response, expected_labels)
-            dict_entry = get_final_dict_entry(answer_dict, image)
+            dict_entry = get_final_dict_entry(answer_dict, image_id)
             dict_entry.update({"response_time": round(response_time, 2)})
         except Exception as e:
             print(f"Error processing image {image} due to: {e}.")
-            dict_entry = {"img_id": image}
+            dict_entry = {"img_id": image_id}
     
         results.append(dict_entry)
+
+        # save checkpoint after every image
+        if checkpoint_path:
+            try:
+                pd.DataFrame(results).to_excel(checkpoint_path, index=False)
+            except Exception as ce:
+                print(f"Warning: could not save checkpoint: {ce}")
+
         print(f"===== Image {n} out of {len(images)} classified! =====")
         n += 1
 
@@ -162,12 +196,26 @@ def label_images(images, model_id):
     return labeling_outputs, responses
 
 
-# start from here
-model_id = TEXT_MODELS[0]
-login(hugg_key) # log into hugging face (gated models like gemma)
+if __name__ == "__main__":
+    screenshot_set = "screenshots 1"
+    image_folder = f"data/{screenshot_set}"
+    images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
 
-image = images[4]
-labeling_outputs, responses = label_images(images, model_id)
-print(labeling_outputs)
+    # read the keys
+    with open('keys.txt') as f:
+        json_data = json.load(f)
 
-labeling_outputs.to_excel(f"data/{screenshot_set}_classifications_{model_id}.xlsx", index=False)
+    hugg_key = json_data["huggingface"]
+
+    # start from here
+    model_id = TEXT_MODELS[0]
+    login(hugg_key) # log into hugging face (gated models like gemma)
+
+    image = images[4]
+    labeling_outputs, responses = label_images(
+        images, model_id, image_folder,
+        checkpoint_path=f"data/{screenshot_set}_classifications_{model_id}_checkpoint.xlsx"
+    )
+    print(labeling_outputs)
+
+    labeling_outputs.to_excel(f"data/{screenshot_set}_classifications_{model_id}.xlsx", index=False)
