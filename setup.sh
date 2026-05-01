@@ -1,10 +1,19 @@
 #!/bin/bash
 # ============================================================
-# Run once at the start of each GPU session  bash kidad/setup.sh
+# Run once at the start of each GPU session  bash setup.sh
 # ============================================================
 
-# activate the venv with source /root/.venv/bin/activate
-# then run the main script with `nohup python -m kidad.screenshot_filtering.example &`
+# activate the venv with source /workspace/persistent/.venv/bin/activate
+# then run the main script with:
+# single participant
+# nohup python -m main --enrol 23841529678 > logs/23841529678.log 2>&1 &
+# see the progress with `tail -f logs/23841529678.log`
+
+# all participants
+# nohup python -m main --all > logs/all.log 2>&1 &
+
+# specific list
+# nohup python -m main --enrol 23841529678 12345678 99999999 > logs/batch.log 2>&1 &
 
 set -e  # stop on first error
 
@@ -17,9 +26,15 @@ echo "System dependencies installed"
 
 
 echo "========================================"
-echo " Step 2: Activate virtual environment"
+echo " Step 2: Create and activate virtual environment"
 echo "========================================"
-source /root/.venv/bin/activate
+if [ ! -d "/workspace/persistent/.venv" ]; then
+    python3 -m venv /workspace/persistent/.venv
+    echo "Virtualenv created at /workspace/persistent/.venv"
+else
+    echo "Virtualenv already exists, skipping creation"
+fi
+source /workspace/persistent/.venv/bin/activate
 echo "Virtualenv active: $(which python)"
 
 
@@ -44,11 +59,13 @@ echo "Flash Attention installed"
 echo "========================================"
 echo " Step 6: Python requirements"
 echo "========================================"
-pip install -r kidad/requirements.txt
+pip install -r requirements.txt
 echo "Python requirements installed"
 
 
 echo "========================================"
 echo " Done! Environment ready."
 echo "========================================"
+# create logs folder
+mkdir -p logs
 python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"

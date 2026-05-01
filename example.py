@@ -16,9 +16,6 @@ from accelerate import infer_auto_device_map # to offload to gpu
 # 'models.qwen3_vl.video_processing_qwen3_vl'
 
 CONF_THRESHOLD = 0.7
-#MISTRAL_API_KEY = json_data["mistralai"]
-#API_URL = "https://api.mistral.ai/v1/chat/completions"
-#MODEL = "pixtral-12b-2409"
 MODEL = "Qwen/Qwen3-VL-32B-Instruct" # apparently can process videos too
 # could also try OpenGVLab/InternVL3-38B-hf https://huggingface.co/OpenGVLab/InternVL3-38B-hf
 
@@ -47,7 +44,7 @@ def apply_ocr_fallback(image_path, result):
     return result
 
 
-def qwen_call(model, processor, model_id, image):
+def qwen_call(model, processor, image):
 
     image_id = os.path.splitext(os.path.basename(image))[0]
     print(f'======== Labeling image: {image_id}. ========\n')
@@ -88,7 +85,7 @@ def qwen_call(model, processor, model_id, image):
     print(response)
 
 
-def qwen_call_video(model, processor, model_id, video_frames, model_fps = 0.7):
+def qwen_call_video(model, processor, video_frames):
 
     video_id = video_frames["clip_id"]
     print(f'======== Labeling clip: {video_id} ({len(frames)} frames). ========\n')
@@ -134,7 +131,7 @@ def qwen_call_video(model, processor, model_id, video_frames, model_fps = 0.7):
     return response, response_time
 
 
-def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
+def filter_ads(media, model_id, images = False):
 
     login(hugg_key)
 
@@ -155,7 +152,7 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
             if images:
                 response = qwen_call(model, processor, model_id, med)
             else: 
-                response, response_time = qwen_call_video(model, processor, model_id, med)
+                response, response_time = qwen_call_video(model, processor, med)
             responses.append(response)
             item = response["items"][0]
             signals = item.get("signals", [])
@@ -192,7 +189,8 @@ def filter_ads(media, model_id, api_key = None, api_url = None, images = True):
             #     results[-1]["confidence"] = confidence_new
 
         except Exception as e:
-            print(f"Error processing {"image" if images else "video"} {med}: {e}")
+            print(f"Error processing {"image" if images else "video"} {med["clip_id"]}: {e}")
+            print(response)
             results.append({
                 "id": med if images else med["clip_id"],
                 "label": "UNCERTAIN",
@@ -251,11 +249,14 @@ frames_df["start_time"] = frames_df["start_time"].dt.tz_localize(None)
 frames_df["end_time"] = frames_df["end_time"].dt.tz_localize(None)
 frames_df.to_excel("kidad/data/frames_test.xlsx")
 
-results, responses = filter_ads(media=frames, model_id=MODEL, images=False)
+results, responses = filter_ads(media=frames, model_id=MODEL)
 
 results["start_time"] = results["start_time"].dt.tz_localize(None)
 results["end_time"] = results["end_time"].dt.tz_localize(None)
 results.to_excel(f"kidad/data/test_results_{str(enrol_test_nr)}.xlsx")
+
+with open(f"kidad/data/test_responses_{str(enrol_test_nr)}.json", "w") as f:
+    json.dump(responses, f, indent=4)
 
 # ============================================================================
 # the steps for doing the analysis:
