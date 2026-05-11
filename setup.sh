@@ -3,17 +3,24 @@
 # Run once at the start of each GPU session  bash setup.sh
 # ============================================================
 
+# ===== run order:
+# python round1.py --all        # round 1 (ads vs non-ads)
+# python aggregate.py           # combine results
+# python round2.py              # round 2 (food ads annotation)
+
 # activate the venv with source /workspace/persistent/.venv/bin/activate
-# then run the main script with:
-# single participant
-# nohup python -m main --enrol 23841529678 > logs/23841529678.log 2>&1 &
-# see the progress with `tail -f logs/23841529678.log`
 
-# all participants
-# nohup python -m main --all > logs/all.log 2>&1 &
+# then run the first round script with:
+# nohup python -m main --enrol 23841516878 > logs/23841516878.log 2>&1 &
+# to check the output live: `tail -f logs/23841516878.log`
 
-# specific list
-# nohup python -m main --enrol 23841529678 12345678 99999999 > logs/batch.log 2>&1 &
+# or all participants
+# nohup python -m main --all > logs/all_28_38.log 2>&1 &
+
+# and second round script with:
+# nohup python -m round2 > logs/round2_test.log 2>&1 &
+# tail -f logs/round2_test.log
+
 
 set -e  # stop on first error
 
@@ -69,3 +76,4 @@ echo "========================================"
 # create logs folder
 mkdir -p logs
 python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+
