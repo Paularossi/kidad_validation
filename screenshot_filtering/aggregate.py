@@ -1,6 +1,7 @@
 import pandas as pd
 import shutil
 import os
+import ast
 
 # just to split all the images into individual folders for each participant
 # i did this to make it easier to upload data into the DSRI
@@ -24,8 +25,41 @@ for enrol_nr in metadata['enrol_number'].unique():
     print(f"\n{'='*50}\nMoved images for participant {enrol_nr}\n{'='*50}")
 
 
+# select only the food ads for round 2 annotation
+food_ads = pd.read_excel("data/aggregated/food_ads_round2.xlsx")
+base_output = "data/food_ads"
+os.makedirs(base_output, exist_ok=True)
 
-# to group results from all participants together
+missing = []
+copied = 0
+
+for _, row in food_ads.iterrows():
+    enrol_nr = str(row["enrol_number"])
+    paths = ast.literal_eval(row["ad_screenshot_paths"]) if isinstance(row["ad_screenshot_paths"], str) else row["ad_screenshot_paths"]
+    
+    for p in paths:
+        filename = os.path.basename(p)
+        # reconstruct local source path
+        src = os.path.join("data/participants", enrol_nr, filename)
+        # mirror the pod folder structure
+        dst_dir = os.path.join(base_output, enrol_nr)
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, filename)
+        
+        if os.path.exists(src):
+            if not os.path.exists(dst):  # skip if already copied
+                shutil.copy2(src, dst)
+                copied += 1
+        else:
+            missing.append(f"{enrol_nr}/{filename}")
+
+print(f"Copied: {copied} images")
+print(f"Missing: {len(missing)} images")
+if missing:
+    print("First 10 missing:", missing[:10])
+
+
+# to group results from all participants from first round together for second round annotation
 import os
 import json
 import pandas as pd

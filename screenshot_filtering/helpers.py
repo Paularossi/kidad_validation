@@ -7,6 +7,19 @@ import os
 import pandas as pd
 
 
+def annotate_frames_with_index(frames):
+    """Burn frame index into top-left corner of each frame for reliable localization."""
+    from PIL import ImageDraw
+    annotated = []
+    for i, frame in enumerate(frames):
+        img = frame.copy()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, 120, 40], fill="black")
+        draw.text((5, 10), f"Frame {i}", fill="white")
+        annotated.append(img)
+    return annotated
+
+
 def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes = 10.0, playback_fps = 2.0, video_codec = "mp4v"):
     os.makedirs(output_folder, exist_ok=True)
     ext = ".mp4"
@@ -57,7 +70,7 @@ def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes =
         for path, _ in batch:
             img = Image.open(path).convert("RGB")
             if img.size != (w, h):
-                img = img.resize((w, h), Image.LANCZOS)
+                img = img.resize((w, h), Image.LANCZOS)        
             frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
             writer.write(frame)
  
@@ -65,7 +78,7 @@ def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes =
  
         clips.append({
             "video_path": out_path,
-            "clip_index": clip_idx,
+            "clip_id": f"clip_{clip_idx:04d}_{actual_start.strftime('%H%M%S')}_{actual_end.strftime('%H%M%S')}",
             "start_time": actual_start,
             "end_time": actual_end,
             "n_frames": len(batch),

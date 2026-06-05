@@ -11,11 +11,11 @@
 # activate the venv with source /workspace/persistent/.venv/bin/activate
 
 # then run the first round script with:
-# nohup python -m main --enrol 23841516878 > logs/23841516878.log 2>&1 &
-# to check the output live: `tail -f logs/23841516878.log`
+# nohup python -m round1_vid --enrol 23841517978 > logs/23841517978.log 2>&1 &
+# to check the output live: tail -f logs/23841517978.log
 
 # or all participants
-# nohup python -m main --all > logs/all_28_38.log 2>&1 &
+# nohup python -m round1 --all > logs/all_28_38.log 2>&1 &
 
 # and second round script with:
 # nohup python -m round2 > logs/round2_test.log 2>&1 &
@@ -77,3 +77,14 @@ echo "========================================"
 mkdir -p logs
 python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
 
+
+
+# to log into the OC client
+# copy the login command from the DSRI web UI
+# then get the pod ID `oc get pod --selector app=kidad-gpu-jup | xargs -I{} oc cp <folder_to_copy> {}:<absolute_path_in_pod>`: kidad-gpu-jup-6c4f6bc8ff-2hm9j
+# copy images from local to the pod: 
+# cd "C:/Users/P70090005/OneDrive - Maastricht University/Documents/kidad_validation/data/food_ads"
+# `oc cp 23841529678 kidad-gpu-jup-6c4f6bc8ff-dfscj:/workspace/persistent/kidad/data/participants/23841529678`
+
+# copy from pod to local:
+# `oc cp kidad-gpu-jup-6c4f6bc8ff-dfscj:/workspace/persistent/kidad/data/results/ results/`

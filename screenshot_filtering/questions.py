@@ -5,7 +5,7 @@ instructions = """
     You are an expert in detecting marketing (including advertising) in mobile social media screenshots. Return ONLY compact JSON on one line.
 
     Classify each screenshot as AD, NON_AD, or UNCERTAIN.
-    Platform UI may show small cues like “Sponsored”, “Promoted”, “Gesponsord”, “Reklame”, or ad disclosures, but you should also rely on visual layout (page/account name with subtle “Sponsored” tag, CTA buttons like “Shop now”, price/discount badges, product hero shots, etc.) and on any text captions.
+    Platform UI may show small cues like "Sponsored", "Promoted", "Gesponsord", "Reklame", or ad disclosures, but you should also rely on visual layout (page/account name with subtle "Sponsored" tag, CTA buttons like "Shop now", price/discount badges, product hero shots, etc.) and on any text captions.
     Labels:
     - AD: a paid promotion or sponsored/boosted post/ad unit
     - NON_AD: organic content, comments, chats, menus, camera, inbox, reels grid, etc.
@@ -42,15 +42,13 @@ instructions_video = """
     --------------------------------------------------
     STEP 2 — MARKETING DETECTION
     --------------------------------------------------
-    Classify the clip as AD, NON_AD, MIXED, or UNCERTAIN.
+    Classify the clip as AD or NON_AD.
 
-    AD: the entire clip (or dominant portion) is a paid promotion or sponsored/boosted post.
+    AD: the clip contains at least one paid promotion, sponsored/boosted post, or brand advertisement — even if only in some frames.
     NON_AD: entirely organic content — no company or brand name or logo is visible anywhere in the clip.
-    MIXED: the clip contains both organic content and one or more ads.
-    UNCERTAIN: not enough evidence to decide.
 
-    A screenshot is classified as AD if a clearly identifiable company or brand name or logo is present. This includes:
-    - Explicit signals: "Sponsored", "Promoted", "Gesponsord", "Reklame", "Paid partnership", #ad
+    A clip is classified as AD if a clearly identifiable company or brand name or logo is present in ANY frame. This includes:
+    - Explicit signals: "Sponsored", "Promoted", "Gesponsord", "Reklame", "Sponsorisé", "Paid partnership", #ad
     - Brand presence: logos, packaging, brand identity, product placement
     - Influencer content showing branded products
     - CTA buttons ("Shop now", "Order now"), price/discount badges, product hero shots
@@ -58,29 +56,21 @@ instructions_video = """
     PIPELINE RULE: If NON_AD → stop, skip Step 3.
 
     --------------------------------------------------
-    STEP 3 — AD CHARACTERISATION (only if AD or MIXED)
+    STEP 3 — AD CHARACTERISATION (only if AD)
     --------------------------------------------------
-    If the clip contains ANY ads (label is AD or MIXED), also determine for EACH detected ad:
-    - "start_frame": the index of the frame (0-based) where the ad first becomes clearly visible
-    - "end_frame": the index of the frame where the ad is no longer visible (or last frame if it continues)
-    - Whether the ad promotes food, beverages, or alcohol (YES, NO, or UNSURE)
-    - Any recognizable brands shown (list every distinct brand name, or empty list if none, do NOT guess)
+    If the clip contains ANY ads, determine for EACH detected ad:
+    - "start_sec": the timestamp in seconds where the ad first becomes clearly visible
+    - "end_sec": the timestamp in seconds where the ad is no longer visible (or end of clip if it continues)
+
+    CRITICAL: Report timestamps in seconds as they appear in the video timeline. The video has timestamp markers — use them directly. NEVER estimate or calculate timestamps.
 
     --------------------------------------------------
     OUTPUT FORMAT (strict JSON, one line):
-    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD|MIXED|UNCERTAIN","confidence":0.0,"signals":["..."],"ads":[{"start_frame":0,"end_frame":0,"food_ad":"YES|NO|UNSURE","brands":["Brand"]}]}]}
-
-    Confidence scale:
-    0.90-1.00: very strong evidence
-    0.70-0.89: strong evidence  
-    0.50-0.69: moderate evidence
-    0.30-0.49: weak evidence
-    0.00-0.29: very unclear
-
-    Only include "ads" when label is AD or MIXED; omit it otherwise.
-    For AD, the "ads" list will typically have one entry spanning most or all of the clip.
-    For MIXED, list each distinct ad as a separate entry with its own time range.
-    Be conservative — only mark as AD if brand/ad signals are clearly visible in the clip.
+    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD","confidence":0.0,"signals":["..."],"ads":[{"start_sec":0.0,"end_sec":0.0}]}]}
+    
+    Only include "ads" when label is AD; omit it otherwise.
+    For AD with multiple distinct ads, list each as a separate entry in the "ads" array with its own "ad_frames" list.
+    Be conservative — only mark as AD if brand/ad signals are clearly visible in at least one frame.
     Output JSON ONLY.
     CRITICAL: Return exactly ONE object in the "items" array per clip, regardless of how many ads are found.
     Multiple ads within a clip go in the "ads" array inside that single item — never create multiple items for the same clip ID.
@@ -88,9 +78,9 @@ instructions_video = """
 
 
 instructions_round2 = """
-    You are an expert system for analyzing food and beverage advertising in mobile social media screenshots.
+    You are an expert system for analyzing advertising in mobile social media screenshots.
 
-    You will be shown one or more screenshots that have already been identified as containing a food or beverage advertisement. Your task is to classify the ad across multiple dimensions.
+    You will be shown one or more screenshots that have already been identified as an advertisement. Your task is to classify the ad across multiple dimensions.
     Do NOT guess or infer beyond what is observable. Base all decisions only on visible evidence.
 
     --------------------------------------------------
@@ -99,7 +89,7 @@ instructions_round2 = """
 
     STEP 1.1 — OVERALL CATEGORY
     Select all that apply:
-    - PRODUCT_VISIBLE+BRAND_VISIBLE: a specific food/beverage product AND a brand are both clearly visible
+    - PRODUCT_VISIBLE+BRAND_VISIBLE: a specific product AND a brand are both clearly visible
     - BRAND_VISIBLE_ONLY: a brand is visible but no specific product
     - UNCLEAR: too ambiguous to determine
 
@@ -156,7 +146,6 @@ instructions_round2 = """
     - SOCIAL_MEDIA_FEATURES: hashtags, tags, geotags, stickers, platform UI elements
     - INTERACTIVE_TOOLS: calls to like, comment, share, tag, vote, enter
     - CELEBRITY_ENDORSEMENTS: cross-promotions with celebrities, bands, or specific events (World Cup, festivals)
-    - BRANDED_PRODUCTS: display of product and brand/logo together
     - HOLIDAY_THEMES: themes related to holidays (Christmas, Easter, Ramadan, Halloween, Valentine's Day)
     - NUTRITION_HEALTH_CLAIMS: claims related to nutrition, fitness, health ("low sugar", "rich in vitamins", "healthy")
     - SPECIAL_OFFERS: buy 1 get 1 free, discounts, special sizes, rewards
@@ -244,7 +233,7 @@ instructions_round2 = """
     --------------------------------------------------
     OUTPUT FORMAT (strict JSON, one line):
     --------------------------------------------------
-    {"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR","overall_category":["PRODUCT_VISIBLE+BRAND_VISIBLE|BRAND_VISIBLE_ONLY|UNCLEAR"],"product_categories":["FOOD_PRODUCT|ALCOHOL|TOBACCO_NICOTINE|INFANT_FORMULA|UNCLEAR"],"brand_business_categories":["FOOD_COMPANY|RETAILER|RESTAURANT|ALCOHOL_BRAND|TOBACCO_NICOTINE_BRAND|INFANT_FORMULA_BRAND|DELIVERY_PLATFORM|UNCLEAR"],"brand_main":"STRING","brand_other":["LIST"],"type_of_marketing":["PAID_FOR_AD|OWNED_AD|INFLUENCER_AD|USER_GENERATED|UNCLEAR"],"marketing_strategies":["SOCIAL_MEDIA_FEATURES|INTERACTIVE_TOOLS|CELEBRITY_ENDORSEMENTS|BRANDED_PRODUCTS|HOLIDAY_THEMES|NUTRITION_HEALTH_CLAIMS|SPECIAL_OFFERS|PROMOTIONAL_CHARACTERS|IMAGES_CHILDREN_TEENS_ADULTS|TASTE_APPEAL|FUN_EMOTIONAL_APPEAL|CHILD_KID_REFERENCE|NONE|UNCLEAR"],"target_group":"CHILD_TARGETED|ADOLESCENT_TARGETED|ADULT_TARGETED|UNKNOWN","who_category":["CHOCOLATE_SUGAR|CAKES_PASTRIES|SAVOURY_SNACKS|JUICES|DAIRY_MILK_DRINKS|PLANT_MILK_DRINKS|ENERGY_DRINKS|SOFT_DRINKS|WATERS_TEA_COFFEE|EDIBLE_ICES|BREAKFAST_CEREALS|YOGHURTS|CHEESE|READYMADE_CONVENIENCE|BUTTER_OILS|BREAD_PRODUCTS|PASTA_RICE_GRAINS|FRESH_MEAT_POULTRY_FISH|PROCESSED_MEAT_POULTRY_FISH|VEGAN_MEAT|FRESH_FRUIT_VEG|PROCESSED_FRUIT_VEG|SAUCES_DIPS_DRESSINGS|NS|NA"],"nova_category":"UNPROCESSED|PROCESSED|ULTRA_PROCESSED|INGREDIENTS|NA_PROCESSING|NS","confidence":0.0}
+    {"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR","overall_category":["PRODUCT_VISIBLE+BRAND_VISIBLE|BRAND_VISIBLE_ONLY|UNCLEAR"],"product_categories":["FOOD_PRODUCT|ALCOHOL|TOBACCO_NICOTINE|INFANT_FORMULA|UNCLEAR"],"brand_business_categories":["FOOD_COMPANY|RETAILER|RESTAURANT|ALCOHOL_BRAND|TOBACCO_NICOTINE_BRAND|INFANT_FORMULA_BRAND|DELIVERY_PLATFORM|UNCLEAR"],"brand_main":"STRING","brand_other":["LIST"],"type_of_marketing":["PAID_FOR_AD|OWNED_AD|INFLUENCER_AD|USER_GENERATED|UNCLEAR"],"marketing_strategies":["SOCIAL_MEDIA_FEATURES|INTERACTIVE_TOOLS|CELEBRITY_ENDORSEMENTS|HOLIDAY_THEMES|NUTRITION_HEALTH_CLAIMS|SPECIAL_OFFERS|PROMOTIONAL_CHARACTERS|IMAGES_CHILDREN_TEENS_ADULTS|TASTE_APPEAL|FUN_EMOTIONAL_APPEAL|CHILD_KID_REFERENCE|NONE|UNCLEAR"],"target_group":"CHILD_TARGETED|ADOLESCENT_TARGETED|ADULT_TARGETED|UNKNOWN","who_category":["CHOCOLATE_SUGAR|CAKES_PASTRIES|SAVOURY_SNACKS|JUICES|DAIRY_MILK_DRINKS|PLANT_MILK_DRINKS|ENERGY_DRINKS|SOFT_DRINKS|WATERS_TEA_COFFEE|EDIBLE_ICES|BREAKFAST_CEREALS|YOGHURTS|CHEESE|READYMADE_CONVENIENCE|BUTTER_OILS|BREAD_PRODUCTS|PASTA_RICE_GRAINS|FRESH_MEAT_POULTRY_FISH|PROCESSED_MEAT_POULTRY_FISH|VEGAN_MEAT|FRESH_FRUIT_VEG|PROCESSED_FRUIT_VEG|SAUCES_DIPS_DRESSINGS|NS|NA"],"nova_category":"UNPROCESSED|PROCESSED|ULTRA_PROCESSED|INGREDIENTS|NA_PROCESSING|NS","confidence":0.0}
 
     Output JSON ONLY. No explanation, no preamble.
     CRITICAL: Return exactly ONE JSON object per ad. Never wrap in an array.
@@ -254,13 +243,9 @@ instructions_round2 = """
 def parse_qwen_json(text):
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text.strip())
-
-    # normalize curly double quotes only 
     text = text.replace('\u201c', '"').replace('\u201d', '"')
-    # sometimes qwen outputs a broken json with two }} at the end
     if text.endswith('}}') and not text.endswith('}]}'):
         text = text[:-1] + ']}'
-
     return json.loads(text)
 
 
