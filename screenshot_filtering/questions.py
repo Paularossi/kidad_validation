@@ -46,6 +46,7 @@ instructions_video = """
 
     AD: the clip contains at least one paid promotion, sponsored/boosted post, or brand advertisement — even if only in some frames.
     NON_AD: entirely organic content — no company or brand name or logo is visible anywhere in the clip.
+    UNCLEAR: not enough evidence to decide (poor image quality, ambiguous brand or logo visibility).
 
     A clip is classified as AD if a clearly identifiable company or brand name or logo is present in ANY frame. This includes:
     - Explicit signals: "Sponsored", "Promoted", "Gesponsord", "Reklame", "Sponsorisé", "Paid partnership", #ad
@@ -66,7 +67,7 @@ instructions_video = """
 
     --------------------------------------------------
     OUTPUT FORMAT (strict JSON, one line):
-    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD","confidence":0.0,"signals":["..."],"ads":[{"start_sec":0.0,"end_sec":0.0}]}]}
+    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD|UNCLEAR","confidence":0.0,"signals":["..."],"ads":[{"start_sec":0.0,"end_sec":0.0}]}]}
     
     Only include "ads" when label is AD; omit it otherwise.
     For AD with multiple distinct ads, list each as a separate entry in the "ads" array with its own "ad_frames" list.

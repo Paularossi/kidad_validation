@@ -18,7 +18,7 @@ from qwen_vl_utils import process_vision_info
 MODEL = "Qwen/Qwen3-VL-32B-Instruct"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PLAYBACK_FPS = 2.0 # must match screenshots_to_videos playback_fps
+PLAYBACK_FPS = 2.0  # must match screenshots_to_videos playback_fps
 
 with open(os.path.join(BASE_DIR, 'keys.txt')) as f:
     json_data = json.load(f)
@@ -38,6 +38,46 @@ def qwen_call_video(model, processor, clip_meta):
 
     print(f'======== Labeling clip: {video_id} ({n_frames} frames, {total_duration_sec:.1f}s). ========\n')
 
+    # single-frame clips can't be decoded as video so pass as image instead
+    if n_frames < 2:
+        print(f"Single-frame clip, using image fallback.")
+        frame = Image.open(clip_meta["screenshot_paths"][0]).convert("RGB")
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"ID: {video_id}"},
+                {"type": "image", "image": frame},
+            ]}
+        ]
+        inputs = processor.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+            return_dict=True, return_tensors="pt"
+        ).to(device)
+
+        start_time = time.time()
+        with torch.inference_mode():
+            generation = model.generate(**inputs, max_new_tokens=1500, do_sample=False)
+
+        response_time = time.time() - start_time
+        print(f"Time taken: {response_time:.2f} seconds")
+
+        generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generation)]
+        raw_response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        print(f"Raw response: {raw_response}")
+
+        del inputs, generation, generated_ids_trimmed
+        torch.cuda.empty_cache()
+
+        try:
+            return parse_qwen_json(raw_response), response_time
+        except Exception as e:
+            print(f"JSON parse error: {e}, attempting fix...")
+            try:
+                return fix_json_with_qwen(model, processor, raw_response), response_time
+            except Exception as e2:
+                print(f"Fix also failed: {e2}")
+                return raw_response, response_time
+                
     messages = [
         {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
         {
@@ -61,13 +101,24 @@ def qwen_call_video(model, processor, clip_meta):
     )
 
     # step 2: extract frames and metadata using process_vision_info
-    images, videos, video_kwargs = process_vision_info(
-        messages,
-        image_patch_size=16,
-        return_video_kwargs=True,
-        return_video_metadata=True
-    )
-
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            images, videos, video_kwargs = process_vision_info(
+                messages,
+                image_patch_size=16,
+                return_video_kwargs=True,
+                return_video_metadata=True
+            )
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"process_vision_info failed (attempt {attempt + 1}/{max_retries}): {e}")
+                print(f"Retrying in 5 seconds...")
+                time.sleep(5)
+            else:
+                raise  # re-raise on final attempt
+                
     # step 3: split videos and metadata
     if videos is not None:
         videos, video_metadatas = zip(*videos)
@@ -82,12 +133,14 @@ def qwen_call_video(model, processor, clip_meta):
         videos=videos,
         video_metadata=video_metadatas,
         return_tensors="pt",
+        #do_resize=False,
         **video_kwargs
     )
 
     print(f"Input IDs shape: {inputs['input_ids'].shape}")
     inputs = inputs.to(device)
 
+    torch.cuda.empty_cache()
     start_time = time.time()
     with torch.inference_mode():
         generation = model.generate(**inputs, max_new_tokens=1500, do_sample=False)
@@ -97,10 +150,10 @@ def qwen_call_video(model, processor, clip_meta):
     print(f"Time taken to generate response: {response_time:.2f} seconds")
     print(f"CUDA memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    torch.cuda.empty_cache()
-
     generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generation)]
     raw_response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    del inputs, generation, generated_ids_trimmed
+    torch.cuda.empty_cache()
     print(f"Raw response: {raw_response}")
 
     try:
@@ -256,7 +309,7 @@ for enrol_test_nr in enrol_numbers:
         meta_images = [os.path.join(image_folder, f) for f in images_list if f in images_set]
         print(f"Images found in folder: {len(meta_images)} out of {len(images_list)} in metadata")
 
-        # create videos and use them primary input instead of frames
+        # create videos — primary input for this pipeline
         videos_df = screenshots_to_videos(
             meta_images=meta_images,
             id_to_ts=id_to_ts,
