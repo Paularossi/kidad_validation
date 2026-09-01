@@ -210,36 +210,36 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
 # ============================================================
 # MAIN
 # ============================================================
+if __name__ == "__main__":
+    AGGREGATED_DIR = os.path.join(BASE_DIR, "data/aggregated")
+    output_path = os.path.join(AGGREGATED_DIR, "round2_results.xlsx")
+    responses_path = os.path.join(AGGREGATED_DIR, "round2_responses.json")
 
-AGGREGATED_DIR = os.path.join(BASE_DIR, "data/aggregated")
-output_path = os.path.join(AGGREGATED_DIR, "round2_results.xlsx")
-responses_path = os.path.join(AGGREGATED_DIR, "round2_responses.json")
+    # load food ads
+    food_ads_path = os.path.join(AGGREGATED_DIR, "food_ads_round2.xlsx")
+    if not os.path.exists(food_ads_path):
+        print(f"ERROR: {food_ads_path} not found. Run aggregate.py first.")
+        exit(1)
 
-# load food ads
-food_ads_path = os.path.join(AGGREGATED_DIR, "food_ads_round2.xlsx")
-if not os.path.exists(food_ads_path):
-    print(f"ERROR: {food_ads_path} not found. Run aggregate.py first.")
-    exit(1)
+    food_ads = pd.read_excel(food_ads_path)
+    print(f"Loaded {len(food_ads)} food ads for round 2 classification.")
 
-food_ads = pd.read_excel(food_ads_path)
-print(f"Loaded {len(food_ads)} food ads for round 2 classification.")
+    # load model once
+    login(hugg_key)
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen3-VL-2B-Instruct", # use 32B for the main run, 2B for testing
+        device_map="cpu", # only for now
+        dtype="auto",
+    ).eval()
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct") # change this to 32B
+    print("Model loaded successfully.")
 
-# load model once
-login(hugg_key)
-model = Qwen3VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen3-VL-2B-Instruct", # use 32B for the main run, 2B for testing
-    device_map="cpu", # only for now
-    dtype="auto",
-).eval()
-processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct") # change this to 32B
-print("Model loaded successfully.")
+    # ===== TEST RUN - REMOVE LATER =====
+    food_ads = food_ads.iloc[263:265] # just two random ads 
 
-# ===== TEST RUN - REMOVE LATER =====
-food_ads = food_ads.iloc[263:265] # just two random ads 
+    # run round 2
+    results, responses = classify_food_ads(food_ads, model, processor, output_path, responses_path)
 
-# run round 2
-results, responses = classify_food_ads(food_ads, model, processor, output_path, responses_path)
-
-print(f"\n{'='*50}")
-print("Round 2 classification complete!")
-print(f"{'='*50}")
+    print(f"\n{'='*50}")
+    print("Round 2 classification complete!")
+    print(f"{'='*50}")

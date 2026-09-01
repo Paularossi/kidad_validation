@@ -251,106 +251,108 @@ def filter_ads(media, model, processor):
     return labeling_outputs, responses
 
 
-# parse arguments
-parser = argparse.ArgumentParser()
-parser.add_argument("--enrol", nargs="+", type=int, help="One or more enrol numbers to process")
-parser.add_argument("--all", action="store_true", help="Process all participants")
-args = parser.parse_args()
+if __name__ == "__main__":
 
-metadata = pd.read_excel(os.path.join(BASE_DIR, "data/metadata.xlsx"))
-metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")]
+    # parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--enrol", nargs="+", type=int, help="One or more enrol numbers to process")
+    parser.add_argument("--all", action="store_true", help="Process all participants")
+    args = parser.parse_args()
 
-all_enrol_numbers = metadata['enrol_number'].unique().tolist()
-if args.all:
-    enrol_numbers = all_enrol_numbers
-elif args.enrol:
-    enrol_numbers = args.enrol
-else:
-    print("Please provide --enrol <number> or --all")
-    exit(1)
+    metadata = pd.read_excel(os.path.join(BASE_DIR, "data/metadata.xlsx"))
+    metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")]
 
-login(hugg_key)
-model = Qwen3VLForConditionalGeneration.from_pretrained(
-    MODEL, device_map="cuda:0", dtype="auto", attn_implementation="flash_attention_2",
-).eval()
-processor = AutoProcessor.from_pretrained(MODEL)
-print(f"Successfully loaded model and processor with id {MODEL}.")
+    all_enrol_numbers = metadata['enrol_number'].unique().tolist()
+    if args.all:
+        enrol_numbers = all_enrol_numbers
+    elif args.enrol:
+        enrol_numbers = args.enrol
+    else:
+        print("Please provide --enrol <number> or --all")
+        exit(1)
 
-for enrol_test_nr in enrol_numbers:
-    image_folder = os.path.join(BASE_DIR, f"data/participants/{enrol_test_nr}")
-    images_set = set(os.listdir(image_folder)) if os.path.exists(image_folder) else set()
+    login(hugg_key)
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        MODEL, device_map="cuda:0", dtype="auto", attn_implementation="flash_attention_2",
+    ).eval()
+    processor = AutoProcessor.from_pretrained(MODEL)
+    print(f"Successfully loaded model and processor with id {MODEL}.")
 
-    participant_dir = os.path.join(BASE_DIR, f"data/results_videos/{str(enrol_test_nr)}")
-    output_path = os.path.join(participant_dir, "results.xlsx")
+    for enrol_test_nr in enrol_numbers:
+        image_folder = os.path.join(BASE_DIR, f"data/participants/{enrol_test_nr}")
+        images_set = set(os.listdir(image_folder)) if os.path.exists(image_folder) else set()
 
-    if os.path.exists(output_path):
-        print(f"Skipping {enrol_test_nr} - already processed.")
-        continue
-    elif not images_set:
-        print(f"Skipping {enrol_test_nr} - no images found.")
-        continue
+        participant_dir = os.path.join(BASE_DIR, f"data/results_videos/{str(enrol_test_nr)}")
+        output_path = os.path.join(participant_dir, "results.xlsx")
 
-    os.makedirs(participant_dir, exist_ok=True)
-    video_dir = os.path.join(participant_dir, "videos")
-    os.makedirs(video_dir, exist_ok=True)
+        if os.path.exists(output_path):
+            print(f"Skipping {enrol_test_nr} - already processed.")
+            continue
+        elif not images_set:
+            print(f"Skipping {enrol_test_nr} - no images found.")
+            continue
 
-    print(f"\n{'='*50}\nProcessing participant {enrol_test_nr}\n{'='*50}")
-    try:
-        meta_test = metadata[metadata['enrol_number'] == enrol_test_nr]
-        print(f"Loaded metadata for participant {enrol_test_nr}: {len(meta_test)} screenshots.")
-        meta_test['Time'] = pd.to_datetime(meta_test['Time'])
-        meta_test = meta_test.sort_values(by='Time')
-        meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0)
-        meta_test["image"] = meta_test["image"].astype(str)
-        id_to_ts = dict(zip(meta_test["image"], meta_test["Time"]))
+        os.makedirs(participant_dir, exist_ok=True)
+        video_dir = os.path.join(participant_dir, "videos")
+        os.makedirs(video_dir, exist_ok=True)
 
-        images_list = meta_test['image'].tolist()
-        images_list = [f"{image}.png" for image in images_list]
-        meta_images = [os.path.join(image_folder, f) for f in images_list if f in images_set]
-        print(f"Images found in folder: {len(meta_images)} out of {len(images_list)} in metadata")
+        print(f"\n{'='*50}\nProcessing participant {enrol_test_nr}\n{'='*50}")
+        try:
+            meta_test = metadata[metadata['enrol_number'] == enrol_test_nr]
+            print(f"Loaded metadata for participant {enrol_test_nr}: {len(meta_test)} screenshots.")
+            meta_test['Time'] = pd.to_datetime(meta_test['Time'])
+            meta_test = meta_test.sort_values(by='Time')
+            meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0)
+            meta_test["image"] = meta_test["image"].astype(str)
+            id_to_ts = dict(zip(meta_test["image"], meta_test["Time"]))
 
-        # create videos — primary input for this pipeline
-        videos_df = screenshots_to_videos(
-            meta_images=meta_images,
-            id_to_ts=id_to_ts,
-            output_folder=video_dir,
-            window_minutes=5.0,
-            playback_fps=PLAYBACK_FPS
-        )
-        videos_df["start_time"] = videos_df["start_time"].dt.tz_localize(None)
-        videos_df["end_time"] = videos_df["end_time"].dt.tz_localize(None)
-        videos_df.to_excel(os.path.join(participant_dir, "frames.xlsx"), index=False)
+            images_list = meta_test['image'].tolist()
+            images_list = [f"{image}.png" for image in images_list]
+            meta_images = [os.path.join(image_folder, f) for f in images_list if f in images_set]
+            print(f"Images found in folder: {len(meta_images)} out of {len(images_list)} in metadata")
 
-        clips = videos_df.to_dict("records")
+            # create videos — primary input for this pipeline
+            videos_df = screenshots_to_videos(
+                meta_images=meta_images,
+                id_to_ts=id_to_ts,
+                output_folder=video_dir,
+                window_minutes=5.0,
+                playback_fps=PLAYBACK_FPS
+            )
+            videos_df["start_time"] = videos_df["start_time"].dt.tz_localize(None)
+            videos_df["end_time"] = videos_df["end_time"].dt.tz_localize(None)
+            videos_df.to_excel(os.path.join(participant_dir, "frames.xlsx"), index=False)
 
-        results, responses = filter_ads(media=clips, model=model, processor=processor)
+            clips = videos_df.to_dict("records")
 
-        results["start_time"] = results["start_time"].dt.tz_localize(None)
-        results["end_time"] = results["end_time"].dt.tz_localize(None)
-        results.to_excel(output_path, index=False)
+            results, responses = filter_ads(media=clips, model=model, processor=processor)
 
-        with open(os.path.join(participant_dir, "responses.json"), "w") as f:
-            json.dump(responses, f, indent=4)
+            results["start_time"] = results["start_time"].dt.tz_localize(None)
+            results["end_time"] = results["end_time"].dt.tz_localize(None)
+            results.to_excel(output_path, index=False)
 
-        ads_df = results[results["n_ads"] > 0].copy()
-        if not ads_df.empty:
-            ads_df = ads_df.explode("ads").reset_index(drop=True)
-            ads_df = pd.concat([
-                ads_df.drop(columns="ads"),
-                ads_df["ads"].apply(pd.Series)
-            ], axis=1)
-            ads_df["start_time"] = ads_df["start_time"].dt.tz_localize(None) if ads_df["start_time"].dt.tz is not None else ads_df["start_time"]
-            ads_df.to_excel(os.path.join(participant_dir, "ads.xlsx"), index=False)
-            print(f"Saved {len(ads_df)} ads to ads.xlsx")
-        else:
-            print("No ads found for this participant.")
+            with open(os.path.join(participant_dir, "responses.json"), "w") as f:
+                json.dump(responses, f, indent=4)
 
-        print(f"Participant {enrol_test_nr} complete. Results saved to {output_path}")
+            ads_df = results[results["n_ads"] > 0].copy()
+            if not ads_df.empty:
+                ads_df = ads_df.explode("ads").reset_index(drop=True)
+                ads_df = pd.concat([
+                    ads_df.drop(columns="ads"),
+                    ads_df["ads"].apply(pd.Series)
+                ], axis=1)
+                ads_df["start_time"] = ads_df["start_time"].dt.tz_localize(None) if ads_df["start_time"].dt.tz is not None else ads_df["start_time"]
+                ads_df.to_excel(os.path.join(participant_dir, "ads.xlsx"), index=False)
+                print(f"Saved {len(ads_df)} ads to ads.xlsx")
+            else:
+                print("No ads found for this participant.")
 
-    except Exception as e:
-        import traceback
-        print(f"Failed for participant {enrol_test_nr}: {e}")
-        print(traceback.format_exc())
-        continue
+            print(f"Participant {enrol_test_nr} complete. Results saved to {output_path}")
 
-print(f"\n{'='*50}\nAll participants processed. Done!\n{'='*50}")
+        except Exception as e:
+            import traceback
+            print(f"Failed for participant {enrol_test_nr}: {e}")
+            print(traceback.format_exc())
+            continue
+
+    print(f"\n{'='*50}\nAll participants processed. Done!\n{'='*50}")

@@ -1,8 +1,8 @@
 import json, os, time, re
 import pandas as pd
 
-from kidad.screenshot_filtering.questions import * # when running from the dsri use kidad.
-from kidad.screenshot_filtering.helpers import *
+from screenshot_filtering.questions import * # when running from the dsri use kidad.
+from screenshot_filtering.helpers import *
 
 # use the GPU if available
 import torch
@@ -165,7 +165,7 @@ def filter_ads(media, model_id, images = False):
                 "label": label,
                 "confidence": confidence,
                 "signals": signals,
-                "response_time": NULL if images else round(response_time, 2),
+                "response_time": None if images else round(response_time, 2),
                 "n_frames": med["n_frames"],
                 "start_time": med["start_time"],
                 "end_time": med["end_time"],
@@ -207,8 +207,8 @@ def filter_ads(media, model_id, images = False):
 
 
 # start from here
-image_folder = "kidad/data/test_images"
-video_folder = "kidad/data/videos"
+image_folder = "data/participants/23841529678"
+video_folder = "data/videos"
 images = [file for file in os.listdir(image_folder) if file.lower().endswith(('.jpg', '.jpeg', '.png'))]
 images = sorted(images)
 
@@ -216,7 +216,7 @@ images = sorted(images)
 # ============================================================================
 # TEST STEP - CONVERT INTO VIDEOS
 # read metadata
-metadata = pd.read_excel("kidad/data/metadata.xlsx")
+metadata = pd.read_excel("data/metadata.xlsx")
 metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")] # remove test accounts
 
 metadata['enrol_number'].value_counts() # check the counts, idk why they are all different
@@ -247,15 +247,15 @@ frames = group_screenshots(meta_images, id_to_ts, window_minutes=10.0)
 frames_df = pd.DataFrame(frames)
 frames_df["start_time"] = frames_df["start_time"].dt.tz_localize(None)
 frames_df["end_time"] = frames_df["end_time"].dt.tz_localize(None)
-frames_df.to_excel("kidad/data/frames_test.xlsx")
+frames_df.to_excel("data/frames_test.xlsx")
 
 results, responses = filter_ads(media=frames, model_id=MODEL)
 
 results["start_time"] = results["start_time"].dt.tz_localize(None)
 results["end_time"] = results["end_time"].dt.tz_localize(None)
-results.to_excel(f"kidad/data/test_results_{str(enrol_test_nr)}.xlsx")
+results.to_excel(f"data/test_results_{str(enrol_test_nr)}.xlsx")
 
-with open(f"kidad/data/test_responses_{str(enrol_test_nr)}.json", "w") as f:
+with open(f"data/test_responses_{str(enrol_test_nr)}.json", "w") as f:
     json.dump(responses, f, indent=4)
 
 # ============================================================================
@@ -282,3 +282,18 @@ with open(f"kidad/data/test_responses_{str(enrol_test_nr)}.json", "w") as f:
 #     dst = os.path.join(image_folder, os.path.basename(image))
 #     if not os.path.exists(dst):
 #         shutil.copy(src, dst)
+
+
+
+from PIL import ImageDraw
+
+def annotate_frames_with_index(frames):
+    annotated = []
+    for i, frame in enumerate(frames):
+        img = frame.copy()
+        draw = ImageDraw.Draw(img)
+        # black rectangle + white text in top-left corner
+        draw.rectangle([0, 0, 120, 40], fill="black")
+        draw.text((5, 10), f"Frame {i}", fill="white")
+        annotated.append(img)
+    return annotated

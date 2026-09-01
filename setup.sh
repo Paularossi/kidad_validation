@@ -4,21 +4,25 @@
 # ============================================================
 
 # ===== run order:
-# python round1.py --all        # round 1 (ads vs non-ads)
-# python aggregate.py           # combine results
-# python round2.py              # round 2 (food ads annotation)
+# round1_vid                # round 1 (ads vs non-ads)
+# aggregate.py              # combine results
+# rerun_failed_clips.py     # re-run failed clips from round 1
+# round2.py                 # round 2 (food ads annotation)
 
 # activate the venv with source /workspace/persistent/.venv/bin/activate
 
 # then run the first round script with:
-# nohup python -m round1_vid --enrol 23841517978 > logs/23841517978.log 2>&1 &
+# nohup python -m screenshot_filtering.round1_vid --enrol 23841517978 > logs/23841517978.log 2>&1 &
 # to check the output live: tail -f logs/23841517978.log
 
 # or all participants
-# nohup python -m round1 --all > logs/all_28_38.log 2>&1 &
+# nohup python -m screenshot_filtering.round1_vid --all > logs/all_1_17.log 2>&1 &
+
+# all failed clips
+# nohup python -m screenshot_filtering.rerun_failed_clips > logs/rerun_failed.log 2>&1 &
 
 # and second round script with:
-# nohup python -m round2 > logs/round2_test.log 2>&1 &
+# nohup python -m screenshot_filtering.round2 > logs/round2_test.log 2>&1 &
 # tail -f logs/round2_test.log
 
 
@@ -83,8 +87,15 @@ python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {
 # copy the login command from the DSRI web UI
 # then get the pod ID `oc get pod --selector app=kidad-gpu-jup | xargs -I{} oc cp <folder_to_copy> {}:<absolute_path_in_pod>`: kidad-gpu-jup-6c4f6bc8ff-2hm9j
 # copy images from local to the pod: 
-# cd "C:/Users/P70090005/OneDrive - Maastricht University/Documents/kidad_validation/data/food_ads"
-# `oc cp 23841529678 kidad-gpu-jup-6c4f6bc8ff-dfscj:/workspace/persistent/kidad/data/participants/23841529678`
+# cd "C:/Users/P70090005/OneDrive - Maastricht University/Documents/kidad_validation/data/participants"
+# oc cp 23841526078 kidad-gpu-jup-5f87fb7559-mlk4l:/workspace/persistent/kidad/data/participants/23841526078
 
 # copy from pod to local:
-# `oc cp kidad-gpu-jup-6c4f6bc8ff-dfscj:/workspace/persistent/kidad/data/results/ results/`
+# oc cp kidad-gpu-jup-5f87fb7559-mlk4l:/workspace/persistent/kidad/data/results_videos/ results_videos/
+
+# to delete folders:
+# oc exec kidad-gpu-jup-6c4f6bc8ff-xrsqt -- rm -rf /workspace/persistent/kidad/data/participants/
+
+# to check the storage:
+# oc exec kidad-gpu-jup-6c4f6bc8ff-xrsqt -- df -h /workspace/persistent/
+
