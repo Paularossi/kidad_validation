@@ -60,15 +60,7 @@ echo "PyTorch installed"
 
 
 echo "========================================"
-echo " Step 4: Flash Attention"
-echo "========================================"
-pip install \
-    "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
-echo "Flash Attention installed"
-
-
-echo "========================================"
-echo " Step 6: Python requirements"
+echo " Step 4: Python requirements"
 echo "========================================"
 pip install -r requirements.txt
 echo "Python requirements installed"
@@ -83,19 +75,12 @@ python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {
 
 
 
-# to log into the OC client
-# copy the login command from the DSRI web UI
-# then get the pod ID `oc get pod --selector app=kidad-gpu-jup | xargs -I{} oc cp <folder_to_copy> {}:<absolute_path_in_pod>`: kidad-gpu-jup-6c4f6bc8ff-2hm9j
-# copy images from local to the pod: 
-# cd "C:/Users/P70090005/OneDrive - Maastricht University/Documents/kidad_validation/data/participants"
-# oc cp 23841526078 kidad-gpu-jup-5f87fb7559-mlk4l:/workspace/persistent/kidad/data/participants/23841526078
 
-# copy from pod to local:
-# oc cp kidad-gpu-jup-5f87fb7559-mlk4l:/workspace/persistent/kidad/data/results_videos/ results_videos/
+# ============= NOTES ON FUTURE ANALYSIS ==============
+# === Screenshot-level detection of relevant advertising.
+# Map the AI segments and their relevance decisions back to screenshot IDs. Compare those with the manual labels across the full sample. 
+# This captures relevant ads missed entirely by the AI, and avoids requiring perfect agreement about grouping.
 
-# to delete folders:
-# oc exec kidad-gpu-jup-6c4f6bc8ff-xrsqt -- rm -rf /workspace/persistent/kidad/data/participants/
-
-# to check the storage:
-# oc exec kidad-gpu-jup-6c4f6bc8ff-xrsqt -- df -h /workspace/persistent/
-
+# === Ad-group-level characterisation.
+# Match human and AI groups using participant ID and overlapping screenshot IDs. Compare the detailed labels for matched groups, 
+# while separately recording missed groups, extra groups, splits, and merges. Do not force ambiguous matches.

@@ -1,128 +1,67 @@
-# KidAd - Food Advertising Detection Pipeline
+# KidAd annotation pipeline
 
-Automated pipeline for detecting and classifying food/beverage advertising in mobile social media screenshots. Built for the KidAd research project, studying food marketing exposure in children and adolescents in Belgium.
- 
-The pipeline uses [Qwen3-VL-32B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct), a multimodal vision-language model, to classify social media screenshots into ads/non-ads and then annotate detected food ads across multiple dimensions (WHO food categories, NOVA processing level, marketing strategies, target age group, brand identification, etc.).
+This project identifies ads in social media screenshots and describes the ads
+relevant to the KidAd study: food and drinks, alcohol, tobacco/nicotine, and infant formula, studying food marketing exposure in children and adolescents in Belgium. The pipeline uses [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), a multimodal vision-language model, to classify social media screenshots into ads/non-ads and then annotate detected food ads across multiple dimensions (WHO food categories, NOVA processing level, marketing strategies, target age group, brand identification, etc.).
 
----
+Round 1 creates video clips from screenshots when needed, reuses existing clips, and detects ads within them. Round 2 reads the screenshots belonging to each detected ad, checks relevance, and completes detailed annotation only when relevance is YES. Prompts and response definitions live in `screenshot_filtering/questions.py`.
 
+## Environment
 
+Run commands from the project root. On DSRI, activate your working environment:
 
-## Prerequisites
-### Infrastructure
-- **Python 3.8+** with packages listed in `requirements.txt`
-- **Local model setup** (Qwen via `Transformers`) 
-- **Platform**: DSRI (Data Science Research Infrastructure) from Maastricht University
-- **Pod**: JupyterLab with PyTorch on GPU (NVIDIA A100 80GB)
-
-### Setup (run once per GPU session)
- 
 ```bash
-source /workspace/persistent/.venv/bin/activate
-cd /workspace/persistent/kidad
-bash setup.sh
+cd /workspace/persistent/kidad_validation
+source .venv/bin/activate
 ```
 
-`setup.sh` installs system dependencies, creates the virtual environment if needed, installs PyTorch with CUDA 12.8, Flash Attention, and all Python requirements.
+For a fresh installation, `bash setup.sh` currently creates the environment at `/workspace/persistent/.venv`; activate that path afterwards instead.
 
-**Configure API keys:**
-   - Create a `keys.txt` file
-   - Add your HuggingFace key
-   - Configure local model endpoints
+Place your Hugging Face token in a project-root `keys.txt` file:
 
+```json
+{"huggingface": "YOUR_TOKEN"}
+```
 
-## Pipeline
- 
-### Run order
- 
+Set these environment variables in the DSRI Deployment so model downloads use persistent storage, including after pod replacement:
+
+```text
+HF_HOME=/workspace/persistent/.cache/huggingface
+HF_HUB_CACHE=/workspace/persistent/.cache/huggingface/hub
+```
+
+Rounds 1 and 2 need the GPU environment. Aggregation and export run locally or on DSRI.
+
+## Input files
+
+Set `DATA_DIR` in `screenshot_filtering/helpers.py` to `os.path.join(BASE_DIR, "data/participants")` for the full dataset, or `os.path.join(BASE_DIR, "data/validation 1")` for validation. This is the only dataset path to change for the three annotation stages. Output folders follow automatically: `data/results_participants/` and `data/aggregated_participants/` for the full dataset, or the existing `data/results_validation/` and `data/aggregated validation/` folders for validation. `--all` processes every numeric participant folder in the selected dataset.
+
+Raw participant folders contain `<screenshot_id>.png` files, with `enrol_number`, `image` and `Time` supplied by `data/metadata.xlsx`. Round 1 creates videos in five-minute capture windows at 2 FPS and saves `clips.xlsx` and `frames.xlsx` beside the screenshots, without copying the images. Existing prepared folders are reused, including the validation sample's `frames/` layout; missing videos are recreated from their recorded screenshots. Missing images or incomplete or inconsistent metadata are reported as errors rather than silently skipped.
+
+## Annotation
+
+Run these commands from the project root, in order:
+
 ```bash
-# Round 1 - classify clips as AD or NON_AD
-nohup python -m round1_vid --all > logs/all.log 2>&1 &
-tail -f logs/all.log
- 
-# Aggregate - combine all participant results
-python screenshot_filtering/aggregate.py
- 
-# Round 2 - classify food ads in detail
-nohup python -m round2 > logs/round2.log 2>&1 &
-tail -f logs/round2.log
+python -m screenshot_filtering.round1_vid --all
+python -m screenshot_filtering.aggregate
+python -m screenshot_filtering.round2
 ```
 
----
+**`screenshot_filtering/round1_vid.py`** detects ads in each clip and records their start/end times. It saves clip classifications in `results.xlsx`, detected ad intervals in `ads.xlsx`, and model responses in `responses.json`, within each participant's results folder. Use `--enrol <enrol_number>` instead of `--all` to select participants. Results are saved after each participant. Rerunning reuses prepared clips, skips saved successful clips and retries failed or missing results; the model is loaded only when annotation is needed.
 
-### Round 1 - Ad Detection (`round1_vid.py`)
- 
-**Input**: participant screenshots from `data/participants/<enrol_number>/`
- 
-**What it does**:
-1. Loads metadata from `metadata.xlsx` (filters out test accounts starting with "32")
-2. Groups screenshots into 5-minute time windows using real capture timestamps
-3. Converts each window into an `.mp4` video at 2fps using OpenCV
-4. Passes each video to Qwen3-VL-32B with `process_vision_info` and `video_metadata` for text-timestamp alignment, enabling second-level temporal localization of ads
-5. Parses JSON response, extracts label/confidence/signals/platform/ads with `start_sec`/`end_sec`
-6. Skips clips with fewer than 2 frames (torchvision constraint)
-7. Skips already-processed participants on rerun
-**Output per participant** (`data/results_videos/<enrol_number>/`):
-- `results.xlsx` - one row per clip: `id`, `label` (AD/NON_AD), `confidence`, `signals`, `platform`, `n_ads`, `ads` (JSON list with `start_sec`, `end_sec` per ad), `response_time`, `n_frames`, `start_time`, `end_time`
-- `ads.xlsx` - exploded version: one row per detected ad, with `start_sec`, `end_sec` columns flattened
-- `frames.xlsx` - clip metadata (video paths, frame counts, timestamps)
-- `responses.json` - raw model responses for debugging
-- `videos/` - `.mp4` files for manual inspection
-**Key design decisions**:
-- Uses `process_vision_info` with `return_video_metadata=True` and passes `video_metadata` to `processor()` directly - this enables Qwen3-VL's text-timestamp alignment feature for precise temporal localization
-- `PLAYBACK_FPS = 2.0` must match between `screenshots_to_videos` and `qwen_call_video`
-- Timestamps in seconds are converted to frame indices via `sec_to_frame(sec) = round(sec * PLAYBACK_FPS)`
----
- 
-### Aggregation (`screenshot_filtering/aggregate.py`)
- 
-**Input**: all `results.xlsx` and `ads.xlsx` files from `data/results_videos/`
- 
-**What it does**:
-1. Combines results across all participants
-2. Deduplicates and cleans up column naming
-3. Filters food/beverage ads (`food_ad = YES or UNSURE`) for round 2
-**Output** (`data/aggregated/`):
-- `all_results.xlsx` - all clips across all participants
-- `all_ads_round2.xlsx` - all detected ads
-- `food_ads_round2.xlsx` - food/beverage ads only (input for round 2)
-- `failed_clips.xlsx` + `failed_clips_summary.xlsx` - UNCERTAIN clips and failure rates per participant
----
- 
-### Round 2 - Food Ad Classification (`round2.py`)
- 
-**Input**: `data/aggregated/food_ads_round2.xlsx`
- 
-**What it does**:
-1. Loads food ads, skips already-processed `ad_id` values (resume support)
-2. For each ad, loads frames from `ad_screenshot_paths` (remapped from `participants/` to `food_ads/`)
-3. Passes frames to Qwen3-VL-32B with `instructions_round2` prompt
-4. Parses JSON response and saves results
-5. Saves incrementally every 10 ads to avoid losing progress on crash
-**Output** (`data/aggregated/`):
-- `round2_results.xlsx` - one row per ad with all classification fields
-- `round2_responses.json` - raw model responses
-**Output columns**: `ad_id`, `enrol_number`, `clip_id`, `platform`, `start_frame`, `end_frame`, `food_ad_round1`, `brands_round1`, `response_time`, `overall_category`, `product_categories`, `brand_business_categories`, `brand_main`, `brand_other`, `type_of_marketing`, `marketing_strategies`, `target_group`, `who_category`, `nova_category`, `confidence`
- 
----
+**`screenshot_filtering/aggregate.py`** combines participant results into `all_results.xlsx` and builds `all_ads_round2.xlsx`, which links each detected ad sequence to its original screenshots. It converts model timestamps into frame indices using the same 2 FPS playback rate: the start is included and the end is excluded, while equal start/end times select a single frame. Aggregation rebuilds these tables each time, so run it after updating Round 1 results. Run it on the same system as Round 2 so the generated screenshot paths remain valid.
 
-## Model
- 
-- **Model**: `Qwen/Qwen3-VL-32B-Instruct`
-- **VRAM**: ~67GB on A100 80GB
-- **Loading**:
-```python
-model = Qwen3VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen3-VL-32B-Instruct",
-    device_map="cuda:0",
-    dtype="auto",
-    attn_implementation="flash_attention_2",
-).eval()
-processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-32B-Instruct")
-```
- 
----
- 
+**`screenshot_filtering/round2.py`** reads `all_ads_round2.xlsx` and assesses every detected ad for study relevance. Relevant ads receive detailed labels for brands, marketing, target group, WHO categories and NOVA; relevance `NO` or `UNSURE` stops detailed annotation. A single screenshot is processed as an image, and multiple screenshots as a video sequence. Results are saved to `round2_results.xlsx` and `round2_responses.json` every ten ads and at completion. Rerunning skips saved successes and retries failures, loading the model only if an ad needs processing. Resume assumes the same model and prompt; use fresh output folders for a deliberate new annotation run.
+
+## Supporting files
+
+**`screenshot_filtering/questions.py`** contains the annotation prompts, label definitions, response schemas and JSON parsing helpers. This is where the two phases' annotation rules are defined, including the relevance stopping rule.
+
+**`screenshot_filtering/helpers.py`** contains screenshot grouping and video creation functions, plus shared Excel and JSON saving functions. It also holds the shared dataset path and preparation settings used by all three stages.
+
+**`example.py`** prints example commands for each pipeline stage and for running a background job on DSRI. Run `python example.py` for all examples or `python example.py round2` for one stage; it does not start annotation.
+
+
 ## Prompts (`screenshot_filtering/questions.py`)
  
 ### `instructions_video` (Round 1)
@@ -134,7 +73,7 @@ Output: `{"items":[{"id":"...","platform":"...","label":"AD|NON_AD","confidence"
  
 ### `instructions_round2` (Round 2)
 Detailed classification of a known food/beverage ad across 7 dimensions:
-- Step 1: product/entity classification (`overall_category`, `product_categories`, `brand_business_categories`)
+- Step 1: product/entity classification (`overall_category`, `product_categories`, `brand_business_categories`) + ad relevance to the study.
 - Step 2: brand identification (`brand_main`, `brand_other`) - Belgian and international brands
 - Step 3: type of marketing (PAID_FOR_AD / OWNED_AD / INFLUENCER_AD / USER_GENERATED / UNCLEAR)
 - Step 4: marketing strategies (SOCIAL_MEDIA_FEATURES, CELEBRITY_ENDORSEMENTS, HOLIDAY_THEMES, NUTRITION_HEALTH_CLAIMS, SPECIAL_OFFERS, PROMOTIONAL_CHARACTERS, IMAGES_CHILDREN_TEENS_ADULTS, TASTE_APPEAL, FUN_EMOTIONAL_APPEAL, CHILD_KID_REFERENCE, NONE, UNCLEAR)
@@ -143,15 +82,15 @@ Detailed classification of a known food/beverage ad across 7 dimensions:
 - Step 7: NOVA processing level (UNPROCESSED / PROCESSED / ULTRA_PROCESSED / INGREDIENTS / NA_PROCESSING / NS)
 ### JSON Parsing (`parse_qwen_json`, `fix_json_with_qwen`)
 Handles common model output issues: markdown fence stripping, smart quote normalization, `}}` → `]}` fix. Falls back to a second Qwen call to fix malformed JSON.
- 
----
 
-## Data
- 
-- **Participants**: Belgian social media users, screenshots collected via passive mobile monitoring
-- **Metadata columns**: `enrol_number`, `image` (filename without extension), `Time` (UTC), `AppId`
-- **Test accounts**: filtered out (`enrol_number` starting with "32")
-- **Relevant apps**: Instagram, Facebook, TikTok, Snapchat, and related app IDs
-- **Screenshot naming**: numeric IDs (e.g. `101022.png`)
-- **Capture interval**: irregular - always use real timestamps, never assume fixed interval
-- **`enrol_number`**: stored as `str()` to prevent Excel from converting to scientific notation
+
+## Validation
+
+**`screenshot_filtering/dieticians_video.py`** prepares the dieticians' validation sample from existing clips and original screenshots, using a fixed random seed. It copies the selected videos and frames and writes their metadata; it is a sample preparation script, not a required step for annotating the full dataset.
+
+**`screenshot_filtering/export_dieticians.py`** matches AI results to the dieticians' workbook by participant and screenshot ID, adding AI labels and ad group IDs to a separate copy. It flags missing, failed or ambiguous matches and does not calculate agreement. By default it writes `data/aggregated validation/dieticians_with_ai.xlsx`; use `--output PATH` for a different destination.
+
+```bash
+python -m screenshot_filtering.export_dieticians
+```
+

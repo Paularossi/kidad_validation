@@ -1,24 +1,25 @@
-import json, os, time
+import json, os, time, ast
 import pandas as pd
 import argparse
+from functools import partial
 
-from screenshot_filtering.questions import *
-from screenshot_filtering.helpers import *
+from screenshot_filtering.questions import instructions_video, parse_qwen_json, fix_json_with_qwen
+from PIL import Image
+from screenshot_filtering.helpers import (save_excel, save_json, prepare_participant,
+                                          BASE_DIR, DATA_DIR, RESULTS_DIR, PLAYBACK_FPS)
 
 import torch
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 from huggingface_hub import login
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import AutoModelForMultimodalLM, AutoProcessor
 from qwen_vl_utils import process_vision_info
 
 # docs from here: https://deepwiki.com/QwenLM/Qwen3-VL/5.4-video-understanding
 # and here: https://github.com/QwenLM/Qwen3-VL/blob/50068df2/cookbooks/video_understanding.ipynb
-MODEL = "Qwen/Qwen3-VL-32B-Instruct"
+MODEL = "Qwen/Qwen3.8-27B" # https://huggingface.co/Qwen/Qwen3.8-27B
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PLAYBACK_FPS = 2.0  # must match screenshots_to_videos playback_fps
 
 with open(os.path.join(BASE_DIR, 'keys.txt')) as f:
     json_data = json.load(f)
@@ -30,6 +31,8 @@ def qwen_call_video(model, processor, clip_meta):
     """
     Uses actual .mp4 file + video_metadata for text-timestamp alignment and follows the official Qwen3-VL pattern from the docs.
     clip_meta: dict with keys clip_id, video_path, n_frames, screenshot_paths, start_time, end_time
+
+    The flow is: messages -> process_vision_info(messages, ...) -> qwen-vl-utils -> processor -> model.generate()
     """
     video_id = clip_meta["clip_id"]
     video_path = clip_meta["video_path"]
@@ -51,7 +54,7 @@ def qwen_call_video(model, processor, clip_meta):
         ]
         inputs = processor.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
-            return_dict=True, return_tensors="pt"
+            return_dict=True, return_tensors="pt", enable_thinking=False
         ).to(device)
 
         start_time = time.time()
@@ -66,7 +69,6 @@ def qwen_call_video(model, processor, clip_meta):
         print(f"Raw response: {raw_response}")
 
         del inputs, generation, generated_ids_trimmed
-        torch.cuda.empty_cache()
 
         try:
             return parse_qwen_json(raw_response), response_time
@@ -88,6 +90,9 @@ def qwen_call_video(model, processor, clip_meta):
                     "type": "video",
                     "video": video_path,
                     "fps": PLAYBACK_FPS,
+                    "min_pixels": 4 * 32 * 32,
+                    "max_pixels": 384 * 32 * 32,
+                    "total_pixels": 24576 * 32 * 32,
                 },
             ],
         }
@@ -97,7 +102,8 @@ def qwen_call_video(model, processor, clip_meta):
     text = processor.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True
+        add_generation_prompt=True,
+        enable_thinking=False,
     )
 
     # step 2: extract frames and metadata using process_vision_info
@@ -133,14 +139,13 @@ def qwen_call_video(model, processor, clip_meta):
         videos=videos,
         video_metadata=video_metadatas,
         return_tensors="pt",
-        #do_resize=False,
+        do_resize=False,
         **video_kwargs
     )
 
     print(f"Input IDs shape: {inputs['input_ids'].shape}")
     inputs = inputs.to(device)
 
-    torch.cuda.empty_cache()
     start_time = time.time()
     with torch.inference_mode():
         generation = model.generate(**inputs, max_new_tokens=1500, do_sample=False)
@@ -153,7 +158,6 @@ def qwen_call_video(model, processor, clip_meta):
     generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generation)]
     raw_response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     del inputs, generation, generated_ids_trimmed
-    torch.cuda.empty_cache()
     print(f"Raw response: {raw_response}")
 
     try:
@@ -245,114 +249,104 @@ def filter_ads(media, model, processor):
             })
 
         n += 1
-        time.sleep(1)
 
     labeling_outputs = pd.DataFrame(results)
     return labeling_outputs, responses
 
 
-if __name__ == "__main__":
-
-    # parse arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--enrol", nargs="+", type=int, help="One or more enrol numbers to process")
-    parser.add_argument("--all", action="store_true", help="Process all participants")
-    args = parser.parse_args()
-
-    metadata = pd.read_excel(os.path.join(BASE_DIR, "data/metadata.xlsx"))
-    metadata = metadata[~metadata['enrol_number'].astype(str).str.startswith("32")]
-
-    all_enrol_numbers = metadata['enrol_number'].unique().tolist()
-    if args.all:
-        enrol_numbers = all_enrol_numbers
-    elif args.enrol:
-        enrol_numbers = args.enrol
-    else:
-        print("Please provide --enrol <number> or --all")
-        exit(1)
-
-    login(hugg_key)
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        MODEL, device_map="cuda:0", dtype="auto", attn_implementation="flash_attention_2",
-    ).eval()
-    processor = AutoProcessor.from_pretrained(MODEL)
-    print(f"Successfully loaded model and processor with id {MODEL}.")
-
-    for enrol_test_nr in enrol_numbers:
-        image_folder = os.path.join(BASE_DIR, f"data/participants/{enrol_test_nr}")
-        images_set = set(os.listdir(image_folder)) if os.path.exists(image_folder) else set()
-
-        participant_dir = os.path.join(BASE_DIR, f"data/results_videos/{str(enrol_test_nr)}")
-        output_path = os.path.join(participant_dir, "results.xlsx")
-
-        if os.path.exists(output_path):
-            print(f"Skipping {enrol_test_nr} - already processed.")
+def saved_round1(output_path, clips):
+    """Keep successful results only when they still match the prepared clips."""
+    if not os.path.exists(output_path):
+        return pd.DataFrame()
+    existing = pd.read_excel(output_path)
+    expected = {clip["clip_id"]: clip for clip in clips}
+    keep = []
+    for row in existing.to_dict("records"):
+        clip = expected.get(row["id"])
+        if clip is None:
+            raise ValueError("Saved results contain unknown clips; use a fresh results folder")
+        if row["n_frames"] != clip["n_frames"] or any(
+            pd.Timestamp(row[key]) != pd.Timestamp(clip[key]) for key in ("start_time", "end_time")
+        ):
+            raise ValueError(f"Prepared clip changed: {row['id']}; use a fresh results folder")
+        if row["label"] not in {"AD", "NON_AD"}:
             continue
-        elif not images_set:
-            print(f"Skipping {enrol_test_nr} - no images found.")
-            continue
-
-        os.makedirs(participant_dir, exist_ok=True)
-        video_dir = os.path.join(participant_dir, "videos")
-        os.makedirs(video_dir, exist_ok=True)
-
-        print(f"\n{'='*50}\nProcessing participant {enrol_test_nr}\n{'='*50}")
         try:
-            meta_test = metadata[metadata['enrol_number'] == enrol_test_nr]
-            print(f"Loaded metadata for participant {enrol_test_nr}: {len(meta_test)} screenshots.")
-            meta_test['Time'] = pd.to_datetime(meta_test['Time'])
-            meta_test = meta_test.sort_values(by='Time')
-            meta_test['delta_time'] = meta_test['Time'].diff().dt.total_seconds().fillna(0)
-            meta_test["image"] = meta_test["image"].astype(str)
-            id_to_ts = dict(zip(meta_test["image"], meta_test["Time"]))
-
-            images_list = meta_test['image'].tolist()
-            images_list = [f"{image}.png" for image in images_list]
-            meta_images = [os.path.join(image_folder, f) for f in images_list if f in images_set]
-            print(f"Images found in folder: {len(meta_images)} out of {len(images_list)} in metadata")
-
-            # create videos — primary input for this pipeline
-            videos_df = screenshots_to_videos(
-                meta_images=meta_images,
-                id_to_ts=id_to_ts,
-                output_folder=video_dir,
-                window_minutes=5.0,
-                playback_fps=PLAYBACK_FPS
-            )
-            videos_df["start_time"] = videos_df["start_time"].dt.tz_localize(None)
-            videos_df["end_time"] = videos_df["end_time"].dt.tz_localize(None)
-            videos_df.to_excel(os.path.join(participant_dir, "frames.xlsx"), index=False)
-
-            clips = videos_df.to_dict("records")
-
-            results, responses = filter_ads(media=clips, model=model, processor=processor)
-
-            results["start_time"] = results["start_time"].dt.tz_localize(None)
-            results["end_time"] = results["end_time"].dt.tz_localize(None)
-            results.to_excel(output_path, index=False)
-
-            with open(os.path.join(participant_dir, "responses.json"), "w") as f:
-                json.dump(responses, f, indent=4)
-
-            ads_df = results[results["n_ads"] > 0].copy()
-            if not ads_df.empty:
-                ads_df = ads_df.explode("ads").reset_index(drop=True)
-                ads_df = pd.concat([
-                    ads_df.drop(columns="ads"),
-                    ads_df["ads"].apply(pd.Series)
-                ], axis=1)
-                ads_df["start_time"] = ads_df["start_time"].dt.tz_localize(None) if ads_df["start_time"].dt.tz is not None else ads_df["start_time"]
-                ads_df.to_excel(os.path.join(participant_dir, "ads.xlsx"), index=False)
-                print(f"Saved {len(ads_df)} ads to ads.xlsx")
-            else:
-                print("No ads found for this participant.")
-
-            print(f"Participant {enrol_test_nr} complete. Results saved to {output_path}")
-
-        except Exception as e:
-            import traceback
-            print(f"Failed for participant {enrol_test_nr}: {e}")
-            print(traceback.format_exc())
+            row["ads"] = ast.literal_eval(row["ads"]) if isinstance(row["ads"], str) else row["ads"]
+            if not isinstance(row["ads"], list) or len(row["ads"]) != row["n_ads"]:
+                continue
+            if row["label"] == "AD" and not row["ads"]:
+                continue
+            if row["label"] == "NON_AD" and row["ads"]:
+                continue
+            if any(not isinstance(ad, dict) or not {"start_sec", "end_sec"}.issubset(ad) for ad in row["ads"]):
+                continue
+        except (ValueError, SyntaxError, TypeError):
             continue
+        keep.append(row)
+    return pd.DataFrame(keep).drop_duplicates("id", keep="last") if keep else pd.DataFrame()
 
-    print(f"\n{'='*50}\nAll participants processed. Done!\n{'='*50}")
+
+def save_round1(results, responses, participant_dir):
+    ads = results.loc[results["n_ads"] > 0].copy()
+    if not ads.empty:
+        ads = ads.explode("ads").reset_index(drop=True)
+        ads = pd.concat([ads.drop(columns="ads"), ads["ads"].apply(pd.Series)], axis=1)
+    else:
+        ads = pd.DataFrame(columns=[c for c in results.columns if c != "ads"] + ["start_sec", "end_sec"])
+    save_json(responses, os.path.join(participant_dir, "responses.json"))
+    save_excel(ads, os.path.join(participant_dir, "ads.xlsx"))
+    save_excel(results, os.path.join(participant_dir, "results.xlsx"))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--enrol", nargs="+", help="One or more enrol numbers to process")
+    selection.add_argument("--all", action="store_true", help="Process all participant folders in DATA_DIR")
+    args = parser.parse_args()
+    enrol_numbers = sorted(folder for folder in os.listdir(DATA_DIR)
+                           if folder.isdigit() and os.path.isdir(os.path.join(DATA_DIR, folder))) if args.all else args.enrol
+    if not enrol_numbers:
+        raise ValueError(f"No participant folders in {DATA_DIR}")
+    model = processor = None
+    failed = []
+    for enrol_number in enrol_numbers:
+        try:
+            print(f"Processing participant {enrol_number}")
+            clips = prepare_participant(os.path.join(DATA_DIR, enrol_number), enrol_number)
+            participant_dir = os.path.join(RESULTS_DIR, enrol_number)
+            os.makedirs(participant_dir, exist_ok=True)
+            existing = saved_round1(os.path.join(participant_dir, "results.xlsx"), clips)
+            completed = set(existing["id"]) if not existing.empty else set()
+            pending = [clip for clip in clips if clip["clip_id"] not in completed]
+            responses_path = os.path.join(participant_dir, "responses.json")
+            responses = []
+            if os.path.exists(responses_path):
+                with open(responses_path, encoding="utf-8") as stream:
+                    responses = json.load(stream)
+                responses = [r for r in responses if isinstance(r, dict) and r.get("items")
+                             and r["items"][0].get("id") in completed]
+            if pending:
+                if model is None:
+                    login(hugg_key)
+                    model = AutoModelForMultimodalLM.from_pretrained(
+                        MODEL, device_map="cuda:0", dtype="auto", attn_implementation="sdpa").eval()
+                    processor = AutoProcessor.from_pretrained(MODEL)
+                    processor.apply_chat_template = partial(processor.apply_chat_template, enable_thinking=False)
+                results, new_responses = filter_ads(pending, model, processor)
+                results = pd.concat([existing, results], ignore_index=True)
+                responses.extend(new_responses)
+            else:
+                print(f"All {len(clips)} clips already processed; skipping annotation.")
+                results = existing
+            for col in ("start_time", "end_time"):
+                results[col] = pd.to_datetime(results[col]).dt.tz_localize(None)
+            save_round1(results, responses, participant_dir)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            failed.append(enrol_number)
+    if failed:
+        raise SystemExit(f"Participants requiring attention: {', '.join(failed)}")
+    print("Round 1 complete.")

@@ -93,6 +93,7 @@ instructions_round2 = """
     - PRODUCT_VISIBLE+BRAND_VISIBLE: a specific product AND a brand are both clearly visible
     - BRAND_VISIBLE_ONLY: a brand is visible but no specific product
     - UNCLEAR: too ambiguous to determine
+    - NOT_APPLICABLE: ad not including neither a product nor a brand
 
     STEP 1.2 — PRODUCT TYPES (only if PRODUCT_VISIBLE+BRAND_VISIBLE)
     Select all that apply:
@@ -101,6 +102,7 @@ instructions_round2 = """
     - TOBACCO_NICOTINE: cigarettes, vapes, nicotine products
     - INFANT_FORMULA: baby formula products
     - UNCLEAR: ambiguous or low-quality image
+    - NOT_APPLICABLE: product visible but unrelated to food, beverages, alcohol, tobacco/nicotine, or infant formula (e.g., iPhone, jeans, facial cream)
 
     STEP 1.3 — BRAND / BUSINESS TYPES (always)
     Select all that apply:
@@ -112,6 +114,19 @@ instructions_round2 = """
     - INFANT_FORMULA_BRAND: baby formula brands
     - DELIVERY_PLATFORM: delivery service (e.g. UberEats, Deliveroo)
     - UNCLEAR: ambiguous or low-quality image
+    - NOT_APPLICABLE: business/logo visible but unrelated to food, beverages, alcohol, tobacco/nicotine, or infant formula (e.g., Zara, Sephora)
+
+    STEP 1.4 — AD RELEVANCE (always)
+    Is this a relevant ad for this study? 
+    - NO: NOT_APPLICABLE was selected in any of the two previous questions (1.2 and 1.3)
+    - YES: any of the other categories were selected in the two previous questions (i.e. FOOD_PRODUCT, ALCOHOL, etc.)
+    - UNSURE: not enough information to determine
+
+    If NOT_APPLICABLE is selected in question 1.2 or 1.3, AD RELEVANCE = NO.
+    Otherwise, if UNCLEAR is selected in question 1.2 or 1.3, AD RELEVANCE = UNSURE.
+    When question 1.2 is skipped because no product is visible, return product_categories = []; a skipped question is not NOT_APPLICABLE.
+    PIPELINE RULE: If AD RELEVANCE = NO or UNSURE → stop, skip Steps 2-7.
+    For skipped Steps 2-7, return empty strings for brand_main, target_group, nova_category and empty lists for brand_other, type_of_marketing, marketing_strategies, who_category. Still return confidence.
 
     --------------------------------------------------
     STEP 2 — BRAND IDENTIFICATION
@@ -234,7 +249,7 @@ instructions_round2 = """
     --------------------------------------------------
     OUTPUT FORMAT (strict JSON, one line):
     --------------------------------------------------
-    {"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR","overall_category":["PRODUCT_VISIBLE+BRAND_VISIBLE|BRAND_VISIBLE_ONLY|UNCLEAR"],"product_categories":["FOOD_PRODUCT|ALCOHOL|TOBACCO_NICOTINE|INFANT_FORMULA|UNCLEAR"],"brand_business_categories":["FOOD_COMPANY|RETAILER|RESTAURANT|ALCOHOL_BRAND|TOBACCO_NICOTINE_BRAND|INFANT_FORMULA_BRAND|DELIVERY_PLATFORM|UNCLEAR"],"brand_main":"STRING","brand_other":["LIST"],"type_of_marketing":["PAID_FOR_AD|OWNED_AD|INFLUENCER_AD|USER_GENERATED|UNCLEAR"],"marketing_strategies":["SOCIAL_MEDIA_FEATURES|INTERACTIVE_TOOLS|CELEBRITY_ENDORSEMENTS|HOLIDAY_THEMES|NUTRITION_HEALTH_CLAIMS|SPECIAL_OFFERS|PROMOTIONAL_CHARACTERS|IMAGES_CHILDREN_TEENS_ADULTS|TASTE_APPEAL|FUN_EMOTIONAL_APPEAL|CHILD_KID_REFERENCE|NONE|UNCLEAR"],"target_group":"CHILD_TARGETED|ADOLESCENT_TARGETED|ADULT_TARGETED|UNKNOWN","who_category":["CHOCOLATE_SUGAR|CAKES_PASTRIES|SAVOURY_SNACKS|JUICES|DAIRY_MILK_DRINKS|PLANT_MILK_DRINKS|ENERGY_DRINKS|SOFT_DRINKS|WATERS_TEA_COFFEE|EDIBLE_ICES|BREAKFAST_CEREALS|YOGHURTS|CHEESE|READYMADE_CONVENIENCE|BUTTER_OILS|BREAD_PRODUCTS|PASTA_RICE_GRAINS|FRESH_MEAT_POULTRY_FISH|PROCESSED_MEAT_POULTRY_FISH|VEGAN_MEAT|FRESH_FRUIT_VEG|PROCESSED_FRUIT_VEG|SAUCES_DIPS_DRESSINGS|NS|NA"],"nova_category":"UNPROCESSED|PROCESSED|ULTRA_PROCESSED|INGREDIENTS|NA_PROCESSING|NS","confidence":0.0}
+    {"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR","overall_category":["PRODUCT_VISIBLE+BRAND_VISIBLE|BRAND_VISIBLE_ONLY|UNCLEAR|NOT_APPLICABLE"],"product_categories":["FOOD_PRODUCT|ALCOHOL|TOBACCO_NICOTINE|INFANT_FORMULA|UNCLEAR|NOT_APPLICABLE"],"brand_business_categories":["FOOD_COMPANY|RETAILER|RESTAURANT|ALCOHOL_BRAND|TOBACCO_NICOTINE_BRAND|INFANT_FORMULA_BRAND|DELIVERY_PLATFORM|UNCLEAR|NOT_APPLICABLE"],"ad_relevance": "YES|NO|UNSURE","brand_main":"STRING","brand_other":["LIST"],"type_of_marketing":["PAID_FOR_AD|OWNED_AD|INFLUENCER_AD|USER_GENERATED|UNCLEAR"],"marketing_strategies":["SOCIAL_MEDIA_FEATURES|INTERACTIVE_TOOLS|CELEBRITY_ENDORSEMENTS|HOLIDAY_THEMES|NUTRITION_HEALTH_CLAIMS|SPECIAL_OFFERS|PROMOTIONAL_CHARACTERS|IMAGES_CHILDREN_TEENS_ADULTS|TASTE_APPEAL|FUN_EMOTIONAL_APPEAL|CHILD_KID_REFERENCE|NONE|UNCLEAR"],"target_group":"CHILD_TARGETED|ADOLESCENT_TARGETED|ADULT_TARGETED|UNKNOWN","who_category":["CHOCOLATE_SUGAR|CAKES_PASTRIES|SAVOURY_SNACKS|JUICES|DAIRY_MILK_DRINKS|PLANT_MILK_DRINKS|ENERGY_DRINKS|SOFT_DRINKS|WATERS_TEA_COFFEE|EDIBLE_ICES|BREAKFAST_CEREALS|YOGHURTS|CHEESE|READYMADE_CONVENIENCE|BUTTER_OILS|BREAD_PRODUCTS|PASTA_RICE_GRAINS|FRESH_MEAT_POULTRY_FISH|PROCESSED_MEAT_POULTRY_FISH|VEGAN_MEAT|FRESH_FRUIT_VEG|PROCESSED_FRUIT_VEG|SAUCES_DIPS_DRESSINGS|NS|NA"],"nova_category":"UNPROCESSED|PROCESSED|ULTRA_PROCESSED|INGREDIENTS|NA_PROCESSING|NS","confidence":0.0}
 
     Output JSON ONLY. No explanation, no preamble.
     CRITICAL: Return exactly ONE JSON object per ad. Never wrap in an array.
@@ -261,7 +276,7 @@ def fix_json_with_qwen(model, processor, raw_response):
     ]
     inputs = processor.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True,
-        return_dict=True, return_tensors="pt"
+        return_dict=True, return_tensors="pt", enable_thinking=False,
     ).to(device)
     
     with torch.inference_mode():
