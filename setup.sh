@@ -3,30 +3,44 @@
 # Run once at the start of each GPU session  bash setup.sh
 # ============================================================
 
-# ===== run order:
-# round1_vid                # round 1 (ads vs non-ads)
+# ===== BEFORE RUNNING THE ANNOTATION ======
+# prepare.py --all          # check/prepare clips and frames
+
+# ===== ANNOTATION RUN ORDER ===== (note: adjust the folder path in helpers.py to change the dataset)
+# round1_vid.py             # round 1 (ads vs non-ads and their intervals)
 # aggregate.py              # combine results
-# rerun_failed_clips.py     # re-run failed clips from round 1
-# round2.py                 # round 2 (food ads annotation)
+# round2.py                 # round 2 (assess relevance and annotate food ads)
 
-# activate the venv with source /workspace/persistent/.venv/bin/activate
+# ===== AFTER ANNOTATION IS DONE =====
+# ad_similarity.py          # re-calculate screenshot similarity to detect missed ads (optional)
+# export_dieticians.py      # append AI annotations to the dieticians workbook
 
-# then run the first round script with:
-# nohup python -m screenshot_filtering.round1_vid --enrol 23841517978 > logs/23841517978.log 2>&1 &
-# to check the output live: tail -f logs/23841517978.log
+# ===== TO PREPARE THE VALIDATION SAMPLE FOR DIETICIANS =====
+# dieticians_video.py       # create validation 1 set for the dieticians (just once)
+# sample_validation.py      # prepare a fresh validation set for the dieticians (excluding the ones already used in another set) 
 
-# or all participants
-# nohup python -m screenshot_filtering.round1_vid --all > logs/all_1_17.log 2>&1 &
 
-# all failed clips
-# nohup python -m screenshot_filtering.rerun_failed_clips > logs/rerun_failed.log 2>&1 &
+# activate the venv with source /workspace/persistent/kidad_validation/.venv/bin/activate
 
-# and second round script with:
+# run the first round script with:
+# nohup python -m screenshot_filtering.round1_vid --all > logs/all.log 2>&1 &
+# to check the output live: tail -f logs/all.log
+
+# or just one participant: 
+# nohup python -m screenshot_filtering.round1_vid --enrol 23841519278 > logs/23841519278.log 2>&1 &
+
+# aggregate the results from round 1:
+# nohup python -m screenshot_filtering.aggregate > logs/aggregate.log 2>&1 &
+
+# and then run the second round script with:
 # nohup python -m screenshot_filtering.round2 > logs/round2_test.log 2>&1 &
 # tail -f logs/round2_test.log
 
 
+
 set -e  # stop on first error
+
+mkdir -p logs
 
 echo "========================================"
 echo " Step 1: System dependencies"
@@ -69,9 +83,8 @@ echo "Python requirements installed"
 echo "========================================"
 echo " Done! Environment ready."
 echo "========================================"
-# create logs folder
-mkdir -p logs
 python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+
 
 
 

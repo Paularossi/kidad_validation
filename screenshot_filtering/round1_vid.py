@@ -1,42 +1,72 @@
-import json, os, time, ast
+import json, os, time, re
 import pandas as pd
 import argparse
-from functools import partial
+from contextlib import contextmanager
 
-from screenshot_filtering.questions import instructions_video, parse_qwen_json, fix_json_with_qwen
-from PIL import Image
-from screenshot_filtering.helpers import (save_excel, save_json, prepare_participant,
-                                          BASE_DIR, DATA_DIR, RESULTS_DIR, PLAYBACK_FPS)
-
-import torch
-
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-from huggingface_hub import login
-from transformers import AutoModelForMultimodalLM, AutoProcessor
-from qwen_vl_utils import process_vision_info
-
-# docs from here: https://deepwiki.com/QwenLM/Qwen3-VL/5.4-video-understanding
-# and here: https://github.com/QwenLM/Qwen3-VL/blob/50068df2/cookbooks/video_understanding.ipynb
-MODEL = "Qwen/Qwen3.8-27B" # https://huggingface.co/Qwen/Qwen3.8-27B
+from screenshot_filtering.questions import instructions_video, parse_model_response, parse_qwen_json
+from PIL import Image, ImageOps
+from screenshot_filtering.helpers import (save_excel, save_json, load_participant, DATA_DIR, RESULTS_DIR, PLAYBACK_FPS, validate_intervals, FRAME_BOUNDS_VERSION, load_annotation_model)
 
 
-with open(os.path.join(BASE_DIR, 'keys.txt')) as f:
-    json_data = json.load(f)
+@contextmanager
+def uniform_video_frames(paths, size=(553, 1200)):
+    """Fit each original into the same RGB canvas without cropping or stretching."""
+    frames = []
+    try:
+        for path in paths:
+            with Image.open(path) as source:
+                with source.convert("RGB") as rgb:
+                    frames.append(ImageOps.pad(rgb, size, method=Image.Resampling.LANCZOS,
+                                               color=(0, 0, 0)))
+        yield frames
+    finally:
+        for frame in frames:
+            frame.close()
 
-hugg_key = json_data["huggingface"]
+
+def parse_round1_response(model, processor, raw_response):
+    """Recover the first complete item when a later part of the response is invalid."""
+    try:
+        return parse_qwen_json(raw_response)
+    except json.JSONDecodeError:
+        text = re.sub(r"^```(?:json)?\s*", "", raw_response.strip())
+        prefix = re.match(r'\{\s*"items"\s*:\s*\[\s*', text)
+        if prefix:
+            try:
+                item, _ = json.JSONDecoder().raw_decode(text, prefix.end())
+                if isinstance(item, dict):
+                    print("Recovered first complete result; ignoring malformed/truncated remainder.", flush=True)
+                    # Preserve the full output alongside the recovered item in responses.json.
+                    return {"items": [item], "raw_response": raw_response,
+                            "recovery": "first_complete_item"}
+            except json.JSONDecodeError:
+                pass
+        return parse_model_response(model, processor, raw_response)
 
 
 def qwen_call_video(model, processor, clip_meta):
     """
-    Uses actual .mp4 file + video_metadata for text-timestamp alignment and follows the official Qwen3-VL pattern from the docs.
+    Uses every ordered original screenshot as a video frame, avoiding decoder sampling.
     clip_meta: dict with keys clip_id, video_path, n_frames, screenshot_paths, start_time, end_time
 
     The flow is: messages -> process_vision_info(messages, ...) -> qwen-vl-utils -> processor -> model.generate()
     """
+    import torch
+    from qwen_vl_utils import process_vision_info
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     video_id = clip_meta["clip_id"]
-    video_path = clip_meta["video_path"]
     n_frames = clip_meta["n_frames"]
+    paths = clip_meta["screenshot_paths"]
+    if n_frames <= 0 or len(paths) != n_frames:
+        raise ValueError(f"Invalid screenshot count for {video_id}")
+    last_frame_sec = (n_frames - 1) / PLAYBACK_FPS
+    timing_text = (
+        f"ID: {video_id}. Original frame count: {n_frames}. FPS: {PLAYBACK_FPS}. "
+        f"Frame spacing: {1 / PLAYBACK_FPS} seconds. First frame timestamp: 0.0. "
+        f"Last original frame timestamp: {last_frame_sec}. "
+        "Report the FIRST and LAST included frames; both endpoints are inclusive. "
+        "Ignore any duplicated final frame used only for processing padding."
+    )
     total_duration_sec = n_frames / PLAYBACK_FPS
 
     print(f'======== Labeling clip: {video_id} ({n_frames} frames, {total_duration_sec:.1f}s). ========\n')
@@ -44,11 +74,12 @@ def qwen_call_video(model, processor, clip_meta):
     # single-frame clips can't be decoded as video so pass as image instead
     if n_frames < 2:
         print(f"Single-frame clip, using image fallback.")
-        frame = Image.open(clip_meta["screenshot_paths"][0]).convert("RGB")
+        with Image.open(clip_meta["screenshot_paths"][0]) as source:
+            frame = source.convert("RGB")
         messages = [
             {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
             {"role": "user", "content": [
-                {"type": "text", "text": f"ID: {video_id}"},
+                {"type": "text", "text": timing_text},
                 {"type": "image", "image": frame},
             ]}
         ]
@@ -70,60 +101,55 @@ def qwen_call_video(model, processor, clip_meta):
 
         del inputs, generation, generated_ids_trimmed
 
-        try:
-            return parse_qwen_json(raw_response), response_time
-        except Exception as e:
-            print(f"JSON parse error: {e}, attempting fix...")
+        return parse_round1_response(model, processor, raw_response), response_time
+
+    with uniform_video_frames(paths) as frames:
+        print(f"Prepared {len(frames)} frames on a 553 x 1200 canvas (aspect ratio preserved).", flush=True)
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": timing_text},
+                    {
+                        "type": "video",
+                        "video": frames,
+                        "sample_fps": PLAYBACK_FPS,
+                        "raw_fps": PLAYBACK_FPS,
+                        "min_pixels": 4 * 32 * 32,
+                        "max_pixels": 384 * 32 * 32,
+                        "total_pixels": 24576 * 32 * 32,
+                    },
+                ],
+            }
+        ]
+
+        # step 1: get text input without tokenizing
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+        # step 2: extract frames and metadata using process_vision_info
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                return fix_json_with_qwen(model, processor, raw_response), response_time
-            except Exception as e2:
-                print(f"Fix also failed: {e2}")
-                return raw_response, response_time
-                
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": instructions_video}]},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"ID: {video_id}"},
-                {
-                    "type": "video",
-                    "video": video_path,
-                    "fps": PLAYBACK_FPS,
-                    "min_pixels": 4 * 32 * 32,
-                    "max_pixels": 384 * 32 * 32,
-                    "total_pixels": 24576 * 32 * 32,
-                },
-            ],
-        }
-    ]
-
-    # step 1: get text input without tokenizing
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
-
-    # step 2: extract frames and metadata using process_vision_info
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            images, videos, video_kwargs = process_vision_info(
-                messages,
-                image_patch_size=16,
-                return_video_kwargs=True,
-                return_video_metadata=True
-            )
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"process_vision_info failed (attempt {attempt + 1}/{max_retries}): {e}")
-                print(f"Retrying in 5 seconds...")
-                time.sleep(5)
-            else:
-                raise  # re-raise on final attempt
+                images, videos, video_kwargs = process_vision_info(
+                    messages,
+                    image_patch_size=16,
+                    return_video_kwargs=True,
+                    return_video_metadata=True
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"process_vision_info failed (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"Retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    raise  # re-raise on final attempt
                 
     # step 3: split videos and metadata
     if videos is not None:
@@ -131,6 +157,26 @@ def qwen_call_video(model, processor, clip_meta):
         videos, video_metadatas = list(videos), list(video_metadatas)
     else:
         video_metadatas = None
+
+    if videos is None or len(videos) != 1 or video_metadatas is None:
+        raise ValueError(f"Expected exactly one prepared video for {video_id}")
+    prepared_count = int(videos[0].shape[0])
+    # qwen-vl-utils pads odd frame lists by duplicating their last image.
+    if prepared_count not in {n_frames, n_frames + (n_frames % 2)}:
+        raise ValueError(f"Frame coverage changed for {video_id}: {n_frames} -> {prepared_count}")
+    indices = [int(i) for i in video_metadatas[0]["frames_indices"]]
+    if indices[:n_frames] != list(range(n_frames)) or len(indices) != prepared_count:
+        raise ValueError(f"Frames were sampled or reordered for {video_id}")
+    video_metadatas[0] = {
+        **video_metadatas[0],
+        "fps": PLAYBACK_FPS,
+        "total_num_frames": n_frames,
+        "duration": n_frames / PLAYBACK_FPS,
+        "frames_indices": list(range(n_frames)) + [n_frames - 1] * (prepared_count - n_frames),
+    }
+    video_kwargs["do_sample_frames"] = False
+    print(f"Frame coverage: {n_frames}/{n_frames} originals; "
+          f"{prepared_count - n_frames} padding frames; last timestamp {last_frame_sec}s.")
 
     # step 4: call processor() directly with video_metadata for timestamp alignment
     inputs = processor(
@@ -160,34 +206,36 @@ def qwen_call_video(model, processor, clip_meta):
     del inputs, generation, generated_ids_trimmed
     print(f"Raw response: {raw_response}")
 
-    try:
-        response = parse_qwen_json(raw_response)
-        return response, response_time
-    except Exception as e:
-        print(f"!!!!!!! JSON parse error: {e} !!!!!!!!")
-        try:
-            print(f"Failed at position {e.pos}, char: {repr(raw_response[e.pos-2:e.pos+2])}")
-            print(f"Bytes: {raw_response[e.pos-2:e.pos+2].encode('utf-8')}")
-        except Exception:
-            pass
-        print(f"\nAttempting fix with Qwen...")
-        try:
-            response = fix_json_with_qwen(model, processor, raw_response)
-            print(f"Fixed response: {response}")
-            return response, response_time
-        except Exception as e2:
-            print(f"Fix also failed: {e2}")
-            return raw_response, response_time
+    return parse_round1_response(model, processor, raw_response), response_time
 
 
-def sec_to_frame(sec, playback_fps=PLAYBACK_FPS):
-    """Convert a timestamp in seconds to a frame index."""
-    return max(0, round(sec * playback_fps))
+def extract_round1_item(response, clip_id):
+    """Accept one result, identical copies, or a detached redundant empty ads object.
+
+    Preserve the raw response in the caller's response log. Never discard a second
+    distinct classification, nonempty intervals, unknown fields or conflicting content.
+    """
+    items = response.get("items") if isinstance(response, dict) else None
+    if (isinstance(items, list) and len(items) > 1
+            and isinstance(items[0], dict) and items[0].get("id") == clip_id
+            and all(isinstance(item, dict) and item == items[0] for item in items[1:])):
+        print(f"Normalized response for {clip_id}: collapsed {len(items)} identical result objects into one.", flush=True)
+        items = items[:1]  # Do not mutate the response retained in the caller's log.
+    if isinstance(items, list) and len(items) == 2:
+        main = [item for item in items if isinstance(item, dict) and item.get("id") == clip_id]
+        if (len(main) == 1 and main[0].get("label") in {"NON_AD", "UNCLEAR"}
+                and main[0].get("ads", []) == []
+                and sum(item == {"ads": []} for item in items) == 1):
+            print(f"Normalized response for {clip_id}: removed a redundant separate empty ads object.", flush=True)
+            items = main
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        raise ValueError("Expected exactly one result object for the clip")
+    return items[0]
 
 
 def filter_ads(media, model, processor):
     """
-    media: list of dicts from screenshots_to_videos
+    media: list of dicts from load_participant
     (has video_path, clip_id, n_frames, screenshot_paths, start_time, end_time)
     """
     results = []
@@ -196,7 +244,6 @@ def filter_ads(media, model, processor):
 
     for med in media:
         print(f"Processing video {n}/{len(media)}")
-        # TODO: skip clips with < 2 frames before calling qwen ???
         try:
             response, response_time = qwen_call_video(model, processor, med)
             responses.append(response)
@@ -204,7 +251,12 @@ def filter_ads(media, model, processor):
             if isinstance(response, str):
                 raise ValueError(f"JSON parse failed, raw response: {response[:200]}")
 
-            item = response["items"][0]
+            item = extract_round1_item(response, med["clip_id"])
+            if item.get("id") != med["clip_id"]:
+                raise ValueError("Response clip ID does not match the input")
+            if item.get("label") not in {"AD", "NON_AD", "UNCLEAR"}:
+                raise ValueError("Invalid clip classification")
+            ads = validate_intervals(item.get("ads", []), item["label"], med["n_frames"])
             signals = item.get("signals", [])
             label = item["label"]
             confidence = item["confidence"]
@@ -220,8 +272,8 @@ def filter_ads(media, model, processor):
                 "end_time": med["end_time"],
                 "n_screenshots": len(med["screenshot_paths"])
             }
+            result_entry["frame_bounds_version"] = FRAME_BOUNDS_VERSION
 
-            ads = item.get("ads", [])
             result_entry["platform"] = item.get("platform", "UNKNOWN")
             result_entry["n_ads"] = len(ads)
             result_entry["ads"] = ads
@@ -236,6 +288,7 @@ def filter_ads(media, model, processor):
             results.append({
                 "id": med["clip_id"],
                 "label": "UNCERTAIN",
+                "frame_bounds_version": FRAME_BOUNDS_VERSION,
                 "confidence": 0.0,
                 "signals": [f"Error: {str(e)}"],
                 "response_time": None,
@@ -259,6 +312,8 @@ def saved_round1(output_path, clips):
     if not os.path.exists(output_path):
         return pd.DataFrame()
     existing = pd.read_excel(output_path)
+    if existing["id"].duplicated().any():
+        raise ValueError("Duplicate saved clip IDs; review results before resuming")
     expected = {clip["clip_id"]: clip for clip in clips}
     keep = []
     for row in existing.to_dict("records"):
@@ -271,20 +326,16 @@ def saved_round1(output_path, clips):
             raise ValueError(f"Prepared clip changed: {row['id']}; use a fresh results folder")
         if row["label"] not in {"AD", "NON_AD"}:
             continue
+        if row.get("frame_bounds_version") != FRAME_BOUNDS_VERSION:
+            raise ValueError("Saved results use an older timing/prompt convention; use fresh results")
         try:
-            row["ads"] = ast.literal_eval(row["ads"]) if isinstance(row["ads"], str) else row["ads"]
-            if not isinstance(row["ads"], list) or len(row["ads"]) != row["n_ads"]:
-                continue
-            if row["label"] == "AD" and not row["ads"]:
-                continue
-            if row["label"] == "NON_AD" and row["ads"]:
-                continue
-            if any(not isinstance(ad, dict) or not {"start_sec", "end_sec"}.issubset(ad) for ad in row["ads"]):
+            row["ads"] = validate_intervals(row["ads"], row["label"], clip["n_frames"])
+            if len(row["ads"]) != row["n_ads"]:
                 continue
         except (ValueError, SyntaxError, TypeError):
             continue
         keep.append(row)
-    return pd.DataFrame(keep).drop_duplicates("id", keep="last") if keep else pd.DataFrame()
+    return pd.DataFrame(keep)
 
 
 def save_round1(results, responses, participant_dir):
@@ -299,7 +350,7 @@ def save_round1(results, responses, participant_dir):
     save_excel(results, os.path.join(participant_dir, "results.xlsx"))
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--enrol", nargs="+", help="One or more enrol numbers to process")
@@ -311,10 +362,10 @@ if __name__ == "__main__":
         raise ValueError(f"No participant folders in {DATA_DIR}")
     model = processor = None
     failed = []
-    for enrol_number in enrol_numbers:
+    for participant_index, enrol_number in enumerate(enrol_numbers, 1):
         try:
-            print(f"Processing participant {enrol_number}")
-            clips = prepare_participant(os.path.join(DATA_DIR, enrol_number), enrol_number)
+            print(f"Processing participant {participant_index}/{len(enrol_numbers)}: {enrol_number}", flush=True)
+            clips = load_participant(os.path.join(DATA_DIR, enrol_number))
             participant_dir = os.path.join(RESULTS_DIR, enrol_number)
             os.makedirs(participant_dir, exist_ok=True)
             existing = saved_round1(os.path.join(participant_dir, "results.xlsx"), clips)
@@ -329,11 +380,7 @@ if __name__ == "__main__":
                              and r["items"][0].get("id") in completed]
             if pending:
                 if model is None:
-                    login(hugg_key)
-                    model = AutoModelForMultimodalLM.from_pretrained(
-                        MODEL, device_map="cuda:0", dtype="auto", attn_implementation="sdpa").eval()
-                    processor = AutoProcessor.from_pretrained(MODEL)
-                    processor.apply_chat_template = partial(processor.apply_chat_template, enable_thinking=False)
+                    model, processor = load_annotation_model()
                 results, new_responses = filter_ads(pending, model, processor)
                 results = pd.concat([existing, results], ignore_index=True)
                 responses.extend(new_responses)
@@ -343,6 +390,12 @@ if __name__ == "__main__":
             for col in ("start_time", "end_time"):
                 results[col] = pd.to_datetime(results[col]).dt.tz_localize(None)
             save_round1(results, responses, participant_dir)
+            counts = results["label"].value_counts()
+            errors, unclear = int(counts.get("UNCERTAIN", 0)), int(counts.get("UNCLEAR", 0))
+            print(f"Participant {enrol_number}: {len(results) - errors - unclear} classified, "
+                  f"{unclear} unclear, {errors} errors.", flush=True)
+            if errors or unclear:
+                failed.append(enrol_number)
         except Exception:
             import traceback
             traceback.print_exc()
@@ -350,3 +403,7 @@ if __name__ == "__main__":
     if failed:
         raise SystemExit(f"Participants requiring attention: {', '.join(failed)}")
     print("Round 1 complete.")
+
+
+if __name__ == "__main__":
+    main()

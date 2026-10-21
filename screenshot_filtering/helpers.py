@@ -1,9 +1,10 @@
 from contextlib import contextmanager
 from functools import lru_cache
+import ast
 import tempfile
 import json
+import math
 from PIL import Image
-from datetime import timedelta
 import os
 import pandas as pd
 
@@ -13,11 +14,31 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data/validation 1")
 METADATA_PATH = os.path.join(BASE_DIR, "data/metadata.xlsx")
 PLAYBACK_FPS = 2.0
+FRAME_BOUNDS_VERSION = "inclusive_displayed_frames_v2"
 WINDOW_MINUTES = 5.0
+MODEL = "Qwen/Qwen3.8-27B"
 _dataset = os.path.basename(os.path.normpath(DATA_DIR))
 
 RESULTS_DIR = os.path.join(os.path.dirname(DATA_DIR), "results_validation" if _dataset == "validation 1" else f"results_{_dataset}")
 AGGREGATED_DIR = os.path.join(os.path.dirname(DATA_DIR), "aggregated validation" if _dataset == "validation 1" else f"aggregated_{_dataset}")
+
+
+def inclusive_frame_bounds(start_sec, end_sec, n_frames, fps=PLAYBACK_FPS):
+    """Both endpoints identify included displayed frames on the playback timeline.
+
+    Frame i is displayed during [i/fps, (i+1)/fps). Exact frame timestamps map
+    to themselves; fractional timestamps inside a frame map to that frame.
+    Video duration is outside the valid frame range, not an inclusive endpoint.
+    """
+    start_sec, end_sec = float(start_sec), float(end_sec)
+    if (not math.isfinite(start_sec) or not math.isfinite(end_sec)
+            or not math.isfinite(fps) or fps <= 0
+            or isinstance(n_frames, bool) or int(n_frames) != n_frames or n_frames <= 0):
+        raise ValueError("Invalid timestamps, frame count or FPS")
+    start_position, end_position = round(start_sec * fps, 9), round(end_sec * fps, 9)
+    if not 0 <= start_sec <= end_sec or not 0 <= start_position <= end_position < n_frames:
+        raise ValueError(f"Interval {start_sec}..{end_sec}s outside {n_frames} frames at {fps} FPS")
+    return math.floor(start_position), math.floor(end_position)
 
 
 @lru_cache(maxsize=1)
@@ -25,67 +46,122 @@ def screenshot_metadata(path):
     return pd.read_excel(path, dtype={"enrol_number": str, "image": str})
 
 
-def prepare_participant(source_dir, enrol_number):
-    """Reuse clip metadata, or prepare raw screenshots without copying them."""
-    clips_path = os.path.join(source_dir, "clips.xlsx")
-    frames_path = os.path.join(source_dir, "frames.xlsx")
-    if os.path.exists(clips_path) and os.path.exists(frames_path):
-        clips = pd.read_excel(clips_path)
-        frames = pd.read_excel(frames_path)
-    elif os.path.exists(clips_path) or os.path.exists(frames_path):
-        raise ValueError(f"Incomplete preparation in {source_dir}: both clips.xlsx and frames.xlsx are required")
-    else:
-        metadata = screenshot_metadata(METADATA_PATH)
-        metadata = metadata.loc[metadata["enrol_number"].eq(str(enrol_number))].copy()
-        if metadata.empty:
-            raise ValueError(f"No screenshot metadata for participant {enrol_number}")
-        metadata["Time"] = pd.to_datetime(metadata["Time"], errors="raise")
-        metadata = metadata.sort_values("Time", kind="stable")
-        if metadata["image"].duplicated().any() or metadata["Time"].isna().any():
-            raise ValueError(f"Duplicate screenshot IDs or missing timestamps for {enrol_number}")
-        paths = [os.path.abspath(os.path.join(source_dir, f"{sid}.png")) for sid in metadata["image"]]
-        missing = [path for path in paths if not os.path.isfile(path)]
-        if missing:
-            raise FileNotFoundError(f"Missing {len(missing)} screenshots for {enrol_number}: {missing[:3]}")
-        timestamps = dict(zip(metadata["image"], metadata["Time"]))
-        videos = screenshots_to_videos(paths, timestamps, os.path.join(source_dir, "videos"),
-                                       window_minutes=WINDOW_MINUTES, playback_fps=PLAYBACK_FPS)
-        clips = videos.drop(columns=["screenshot_paths", "video_path"]).copy()
-        clips["video_filename"] = videos["video_path"].map(os.path.basename)
-        frames = pd.DataFrame([
-            {"clip_id": row["clip_id"], "filename": path,
-             "timestamp": timestamps[os.path.splitext(os.path.basename(path))[0]]}
-            for row in videos.to_dict("records") for path in row["screenshot_paths"]
-        ])
-        for col in ("start_time", "end_time"):
-            clips[col] = clips[col].dt.tz_localize(None)
-        frames["timestamp"] = pd.to_datetime(frames["timestamp"]).dt.tz_localize(None)
-        save_excel(frames, frames_path)
-        save_excel(clips, clips_path)
+def read_frame_manifest(source_dir):
+    """Canonical frame order shared by inference, aggregation and similarity."""
+    frames = pd.read_excel(os.path.join(source_dir, "frames.xlsx"),
+                           dtype={"clip_id": str, "filename": str})
+    if not {"clip_id", "filename", "timestamp"}.issubset(frames.columns):
+        raise ValueError(f"Invalid frame manifest in {source_dir}")
+    if frames[["clip_id", "filename", "timestamp"]].isna().any().any():
+        raise ValueError(f"Missing frame metadata in {source_dir}")
+    frames["timestamp"] = pd.to_datetime(frames["timestamp"], format="mixed", utc=True).dt.tz_localize(None)
+    if frames["timestamp"].isna().any():
+        raise ValueError(f"Missing timestamps in {source_dir}")
+    frames["screenshot_path"] = [resolve_frame_path(source_dir, name) for name in frames["filename"]]
+    if frames["screenshot_path"].duplicated().any():
+        raise ValueError(f"Duplicate screenshots in {source_dir}")
+    return frames.sort_values("timestamp", kind="stable").reset_index(drop=True)
 
-    clip_columns = {"clip_id", "video_filename", "n_frames", "start_time", "end_time"}
-    if not clip_columns.issubset(clips.columns) or not {"clip_id", "filename", "timestamp"}.issubset(frames.columns):
-        raise ValueError(f"Invalid clip/frame metadata in {source_dir}")
-    if clips.empty or clips["clip_id"].duplicated().any():
-        raise ValueError(f"Empty or duplicate clips in {source_dir}")
+
+def resolve_frame_path(source_dir, filename):
+    """Resolve prepared or raw images locally, including manifests moved from DSRI."""
+    filename = str(filename).replace("\\", "/")
+    name = filename.rsplit("/", 1)[-1]
+    candidates = [os.path.join(source_dir, "frames", name), os.path.join(source_dir, name),
+                  os.path.join(source_dir, filename)]
+    for path in candidates:
+        path = os.path.abspath(os.path.normpath(path))
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(f"Missing screenshot {filename} in {source_dir}")
+
+
+def load_participant(source_dir):
+    """Read prepared media only; never create manifests or MP4 files."""
+    if not all(os.path.isfile(os.path.join(source_dir, name)) for name in ("clips.xlsx", "frames.xlsx")):
+        raise FileNotFoundError(f"Missing manifests in {source_dir}; run python -m screenshot_filtering.prepare first")
+    clips = pd.read_excel(os.path.join(source_dir, "clips.xlsx"), dtype={"clip_id": str})
+    required = {"clip_id", "video_filename", "n_frames", "start_time", "end_time"}
+    if not required.issubset(clips.columns) or clips.empty or clips["clip_id"].isna().any() or clips["clip_id"].duplicated().any():
+        raise ValueError(f"Invalid or duplicate clips in {source_dir}")
+    frames = read_frame_manifest(source_dir)
     if not set(frames["clip_id"]).issubset(set(clips["clip_id"])):
         raise ValueError(f"Frames refer to unknown clips in {source_dir}")
+    groups = {key: group for key, group in frames.groupby("clip_id", sort=False)}
     records = []
-    groups = {key: group.sort_values("timestamp", kind="stable") for key, group in frames.groupby("clip_id", sort=False)}
     for row in clips.to_dict("records"):
         group = groups.get(row["clip_id"], frames.iloc[:0])
-        paths = [os.path.normpath(os.path.join(source_dir, "frames", str(name))) for name in group["filename"]]
-        if len(paths) != row["n_frames"] or not paths or group["timestamp"].isna().any():
-            raise ValueError(f"Frame count or timestamps invalid for {row['clip_id']}")
-        if any(not os.path.isfile(path) for path in paths):
-            raise FileNotFoundError(f"Missing screenshots for {row['clip_id']}")
-        video_path = os.path.join(source_dir, "videos", row["video_filename"])
-        if row["n_frames"] > 1 and (not os.path.isfile(video_path) or os.path.getsize(video_path) == 0):
-            print(f"Recreating missing video: {video_path}")
-            os.makedirs(os.path.dirname(video_path), exist_ok=True)
-            write_video(paths, video_path, PLAYBACK_FPS)
-        records.append({**row, "video_path": video_path, "screenshot_paths": paths})
+        if group.empty or len(group) != row["n_frames"]:
+            raise ValueError(f"Frame count invalid for {row['clip_id']}")
+        row["n_frames"] = len(group)
+        video_name = str(row["video_filename"]).replace("\\", "/").rsplit("/", 1)[-1]
+        records.append({**row, "video_path": os.path.join(source_dir, "videos", video_name),
+                        "screenshot_paths": group["screenshot_path"].tolist()})
     return records
+
+
+def prepare_participant(source_dir, enrol_number, videos=False):
+    """Create missing manifests; optionally create missing or empty MP4s."""
+    manifests = [os.path.join(source_dir, name) for name in ("clips.xlsx", "frames.xlsx")]
+    if not any(os.path.exists(path) for path in manifests):
+        metadata = screenshot_metadata(METADATA_PATH)
+        metadata = metadata.loc[metadata["enrol_number"].eq(str(enrol_number))].copy()
+        metadata["Time"] = pd.to_datetime(metadata["Time"], format="mixed", utc=True).dt.tz_localize(None)
+        metadata = metadata.sort_values("Time", kind="stable")
+        if metadata.empty or metadata[["image", "Time"]].isna().any().any() or metadata["image"].duplicated().any():
+            raise ValueError(f"Missing or duplicate screenshot metadata for {enrol_number}")
+        metadata["filename"] = metadata["image"] + ".png"
+        for name in metadata["filename"]:
+            resolve_frame_path(source_dir, name)
+        # keep the original fixed five-minute windows, skipping empty windows directly.
+        windows = (metadata["Time"] - metadata["Time"].iloc[0]).dt.total_seconds() // (WINDOW_MINUTES * 60)
+        clips, frames = [], []
+        for index, (_, group) in enumerate(metadata.groupby(windows, sort=True)):
+            start, end = group["Time"].iloc[0], group["Time"].iloc[-1]
+            clip_id = f"clip_{index:04d}_{start:%H%M%S}_{end:%H%M%S}"
+            clips.append(dict(clip_id=clip_id, n_frames=len(group), start_time=start,
+                              end_time=end, video_filename=clip_id + ".mp4"))
+            frames.extend(dict(clip_id=clip_id, filename=r.filename, timestamp=r.Time)
+                          for r in group.itertuples())
+        save_excel(pd.DataFrame(frames), manifests[1])
+        save_excel(pd.DataFrame(clips), manifests[0])
+    media = load_participant(source_dir)
+    if videos:
+        for clip in media:
+            path = clip["video_path"]
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                write_video(clip["screenshot_paths"], path, PLAYBACK_FPS)
+    return media
+
+
+def validate_intervals(ads, label, n_frames):
+    """Reject conflicting groups rather than silently merging or dropping them."""
+    ads = ast.literal_eval(ads) if isinstance(ads, str) else ads
+    if label not in {"AD", "NON_AD", "UNCLEAR", "UNCERTAIN"}:
+        raise ValueError(f"Invalid clip classification: {label}")
+    if not isinstance(ads, list) or (label == "AD") != bool(ads):
+        raise ValueError("AD requires intervals; other labels must have none")
+    bounds = []
+    for ad in ads:
+        if not isinstance(ad, dict) or not {"start_sec", "end_sec"}.issubset(ad):
+            raise ValueError("Ad interval must contain start_sec and end_sec")
+        bounds.append(inclusive_frame_bounds(ad["start_sec"], ad["end_sec"], n_frames))
+    ordered = sorted(bounds)
+    if any(start <= previous_end for (_, previous_end), (start, _) in zip(ordered, ordered[1:])):
+        raise ValueError("Duplicate or overlapping ad intervals; review/retry this clip")
+    return ads
+
+
+def load_annotation_model():
+    """Load GPU dependencies and credentials only when inference is requested."""
+    from huggingface_hub import login
+    from transformers import AutoModelForMultimodalLM, AutoProcessor
+    with open(os.path.join(BASE_DIR, "keys.txt"), encoding="utf-8") as stream:
+        login(json.load(stream)["huggingface"])
+    model = AutoModelForMultimodalLM.from_pretrained(
+        MODEL, device_map="cuda:0", dtype="auto", attn_implementation="sdpa").eval()
+    return model, AutoProcessor.from_pretrained(MODEL)
 
 
 def write_video(paths, output_path, playback_fps, video_codec="mp4v"):
@@ -109,108 +185,6 @@ def write_video(paths, output_path, playback_fps, video_codec="mp4v"):
             writer.release()
         if os.path.getsize(temporary) == 0:
             raise RuntimeError(f"Empty video: {output_path}")
-
-
-def screenshots_to_videos(meta_images, id_to_ts, output_folder, window_minutes = 10.0, playback_fps = 2.0, video_codec = "mp4v"):
-    os.makedirs(output_folder, exist_ok=True)
-    ext = ".mp4"
-
-    timed = []
-    for p in meta_images:
-        sid = os.path.splitext(os.path.basename(p))[0]
-        if sid in id_to_ts:
-            timed.append((p, id_to_ts[sid]))
-    timed.sort(key=lambda x: x[1])
- 
-    print(f"Loaded {len(timed)} screenshots. Window: {window_minutes} min.")
- 
-    if not timed:
-        raise ValueError("No screenshots with timestamps to prepare")
-
-    # slice into windows 
-    window_seconds = window_minutes * 60.0
-    t_start = timed[0][1]
-    clips = []
-    clip_idx = 0
- 
-    i = 0
-    while i < len(timed):
-        window_end = t_start + timedelta(seconds=window_seconds)
- 
-        # collect all frames within [t_start, window_end)
-        batch = []
-        while i < len(timed) and timed[i][1] < window_end:
-            batch.append(timed[i])
-            i += 1
- 
-        if not batch:
-            # shouldn't happen, but guard against empty windows
-            t_start = window_end
-            continue
- 
-        actual_start = batch[0][1]
-        actual_end   = batch[-1][1]
- 
-        out_name = f"clip_{clip_idx:04d}_{actual_start.strftime('%H%M%S')}_{actual_end.strftime('%H%M%S')}{ext}"
-        out_path = os.path.join(output_folder, out_name)
- 
-        write_video([path for path, _ in batch], out_path, playback_fps, video_codec)
-
-        clips.append({
-            "video_path": out_path,
-            "clip_id": f"clip_{clip_idx:04d}_{actual_start.strftime('%H%M%S')}_{actual_end.strftime('%H%M%S')}",
-            "start_time": actual_start,
-            "end_time": actual_end,
-            "n_frames": len(batch),
-            "screenshot_paths": [p for p, _ in batch],
-        })
- 
-        print(f"  Clip {clip_idx:04d}: {len(batch):3d} frames → {out_name}")
- 
-        clip_idx += 1
-        t_start = window_end
- 
-    clips_df = pd.DataFrame(clips)
-    print(f"\nDone. {len(clips)} clips written to {output_folder}")
- 
-    return clips_df
-
-
-def group_screenshots(meta_images, id_to_ts, window_minutes = 10.0):
-    """
-    Group screenshots into time windows and return lists of PIL images (frames are passed directly to Qwen)
-    """
-    # build (path, timestamp) list sorted by time
-    timed = []
-    for p in meta_images:
-        sid = os.path.splitext(os.path.basename(p))[0]
-        if sid in id_to_ts:
-            timed.append((p, pd.to_datetime(id_to_ts[sid])))
-    timed.sort(key=lambda x: x[1])
-
-    window_seconds = window_minutes * 60.0
-    t_start = timed[0][1]
-    windows = []
-    i = 0
-
-    while i < len(timed):
-        window_end = t_start + timedelta(seconds=window_seconds)
-        batch = []
-        while i < len(timed) and timed[i][1] < window_end:
-            batch.append(timed[i])
-            i += 1
-        if batch:
-            windows.append({
-                "clip_id": f"clip_{len(windows):04d}_{batch[0][1].strftime('%H%M%S')}_{batch[-1][1].strftime('%H%M%S')}",
-                "start_time": batch[0][1],
-                "end_time": batch[-1][1],
-                "n_frames": len(batch),
-                "frames": [Image.open(p).convert("RGB") for p, _ in batch],  # just PIL images, no timestamps needed
-                "screenshot_paths": [p for p, _ in batch],
-            })
-        t_start = window_end
-
-    return windows
 
 
 @contextmanager

@@ -1,27 +1,16 @@
 import json, os, time, ast
 import pandas as pd
 from PIL import Image
-from screenshot_filtering.helpers import atomic_output, save_json, BASE_DIR, AGGREGATED_DIR, PLAYBACK_FPS
+from screenshot_filtering.helpers import (atomic_output, save_json, AGGREGATED_DIR, PLAYBACK_FPS, FRAME_BOUNDS_VERSION, load_annotation_model)
 
-from screenshot_filtering.questions import instructions_round2, parse_qwen_json, fix_json_with_qwen
-import torch
-
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-from huggingface_hub import login
-from transformers import AutoModelForMultimodalLM, AutoProcessor
-
-TARGET_SIZE = (553, 1200)  # width, height
-MODEL = "Qwen/Qwen3.8-27B"
-
-with open(os.path.join(BASE_DIR, 'keys.txt')) as f:
-    json_data = json.load(f)
-
-hugg_key = json_data["huggingface"]
+from screenshot_filtering.questions import instructions_round2, parse_model_response
+TARGET_SIZE = (553, 1200)  # Keep uniform frame dimensions for video processing.
 
 
 def qwen_call_round2(model, processor, ad_row):
     """Run round 2 classification on a single ad."""
+    import torch
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     ad_id = f"{ad_row['enrol_number']}_{ad_row['id']}_f{int(ad_row['start_frame'])}"
     print(f'======== Labeling ad: {ad_id} ========\n')
@@ -109,20 +98,8 @@ def qwen_call_round2(model, processor, ad_row):
     generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generation)]
     raw_response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
-    try:
-        response = parse_qwen_json(raw_response)
-        print(response)
-        return response, response_time
-    except Exception as e:
-        print(f"JSON parse error: {e}, attempting fix with Qwen...")
-        try:
-            response = fix_json_with_qwen(model, processor, raw_response)
-            print(f"Fixed response: {response}")
-            return response, response_time
-        except Exception as e2:
-            print(f"Fix also failed: {e2}")
-            print(f"Raw response: {raw_response}")
-            return raw_response, response_time
+    print(f"Raw response: {raw_response}")
+    return parse_model_response(model, processor, raw_response), response_time
 
 
 def validate_response(response, ad_id):
@@ -135,11 +112,10 @@ def validate_response(response, ad_id):
         response["id"] = ad_id
     elif response["id"] != ad_id:
         raise ValueError(f"Response ID mismatch: expected {ad_id}, got {response['id']}")
-    allowed = {
-        "overall_category": {"PRODUCT_VISIBLE+BRAND_VISIBLE", "BRAND_VISIBLE_ONLY", "UNCLEAR", "NOT_APPLICABLE"},
-        "product_categories": {"FOOD_PRODUCT", "ALCOHOL", "TOBACCO_NICOTINE", "INFANT_FORMULA", "UNCLEAR", "NOT_APPLICABLE"},
-        "brand_business_categories": {"FOOD_COMPANY", "RETAILER", "RESTAURANT", "ALCOHOL_BRAND", "TOBACCO_NICOTINE_BRAND", "INFANT_FORMULA_BRAND", "DELIVERY_PLATFORM", "UNCLEAR", "NOT_APPLICABLE"},
-    }
+    schema_line = next(line.strip() for line in instructions_round2.splitlines() if line.strip().startswith('{"id":'))
+    schema = json.loads(schema_line)
+    allowed = {key: set(schema[key][0].split("|"))
+               for key in ("overall_category", "product_categories", "brand_business_categories")}
     for key, labels in allowed.items():
         value = response.get(key)
         if not isinstance(value, list) or any(not isinstance(v, str) or v not in labels for v in value):
@@ -150,22 +126,30 @@ def validate_response(response, ad_id):
     if relevance not in {"YES", "NO", "UNSURE"}:
         raise ValueError("Invalid or missing ad_relevance")
     categories = response["product_categories"] + response["brand_business_categories"]
-    if "NOT_APPLICABLE" in categories and relevance != "NO":
-        raise ValueError("NOT_APPLICABLE requires ad_relevance NO")
-    if "NOT_APPLICABLE" not in categories and "UNCLEAR" in categories and relevance != "UNSURE":
-        raise ValueError("UNCLEAR requires ad_relevance UNSURE")
+    relevant = set(categories) - {"NOT_APPLICABLE", "UNCLEAR"}
+    expected_relevance = "YES" if relevant else ("UNSURE" if "UNCLEAR" in categories else "NO")
+    if relevance != expected_relevance:
+        raise ValueError(f"Categories require ad_relevance {expected_relevance}")
     confidence = response.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise ValueError("Invalid or missing confidence")
-    skipped = {"brand_main": "", "brand_other": [], "type_of_marketing": [],
-               "marketing_strategies": [], "target_group": "", "who_category": [], "nova_category": ""}
+    skipped = {"type_of_marketing": [], "marketing_strategies": [], "target_group": "", "who_category": [], "nova_category": ""}
+    for key, default in {"brand_main": "", "brand_other": []}.items(): # validate brands for ALL ads
+        value = response.get(key)
+        if not isinstance(value, type(default)) or (
+                isinstance(value, list) and any(not isinstance(v, str) for v in value)):
+            raise ValueError(f"Invalid or missing {key}")
     if relevance != "YES":
-        # do not export detailed labels for ads excluded by the stopping rule
+        # brands are kept and all other detailed labels are cleared by the stopping rule
         response = {**response, **skipped}
     else:
+        # Enforce skipped classifications without inventing a food category.
+        products = set(response["product_categories"])
+        if "FOOD_SUPPLEMENTS" in products and not products.intersection({"FOOD_PRODUCT", "INFANT_FORMULA", "UNCLEAR"}):
+            response = {**response, "who_category": ["NA"], "nova_category": "NA_PROCESSING"}
+        elif response.get("who_category") == ["NA"]:
+            response = {**response, "nova_category": "NA_PROCESSING"}
         # use the prompt's output vocabulary to reject invented category labels
-        schema_line = next(line.strip() for line in instructions_round2.splitlines() if line.strip().startswith('{"id":'))
-        schema = json.loads(schema_line)
         for key in ("type_of_marketing", "marketing_strategies", "target_group", "who_category", "nova_category"):
             spec = schema[key]
             labels = set((spec[0] if isinstance(spec, list) else spec).split("|"))
@@ -179,7 +163,7 @@ def validate_response(response, ad_id):
                 raise ValueError(f"Invalid or missing {key}")
             if isinstance(value, list) and any(not isinstance(v, str) for v in value):
                 raise ValueError(f"Invalid labels in {key}")
-            if key not in {"brand_main", "brand_other"} and not value:
+            if not value:
                 raise ValueError(f"Missing classification for {key}")
     return response
 
@@ -199,6 +183,8 @@ def save_results(data, path):
 def classify_food_ads(food_ads_df, model, processor, output_path, responses_path):
     """Loop through all food ads and classify them."""
 
+    if food_ads_df.duplicated(["enrol_number", "id", "start_frame"]).any():
+        raise ValueError("Duplicate ad-group IDs in Round 2 input; repair Round 1 intervals first")
     # load existing results if any (to skip already processed ads)
     if os.path.exists(output_path):
         existing = pd.read_excel(output_path, dtype={"enrol_number": str})
@@ -209,7 +195,8 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
             print(f"Found {failed_mask.sum()} failed ads to retry.")
             existing = existing.loc[~failed_mask].copy()
 
-        existing = existing.drop_duplicates(subset="ad_id", keep="last")
+        if existing["ad_id"].duplicated().any():
+            raise ValueError("Duplicate saved ad-group IDs; review results before resuming")
         current = {f"{r['enrol_number']}_{r['id']}_f{int(r['start_frame'])}": r
                    for r in food_ads_df.to_dict("records")}
         existing = existing.loc[existing["ad_id"].isin(current)].copy()
@@ -254,13 +241,17 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
 
         print(f"\nProcessing ad {n}/{len(food_ads_df)}: {ad_id}")
 
+        fields = ("overall_category", "product_categories", "brand_business_categories", "ad_relevance",
+                  "brand_main", "brand_other", "type_of_marketing", "marketing_strategies", "target_group",
+                  "who_category", "nova_category", "confidence")
+        result_entry = dict.fromkeys(fields)
+        result_entry.update(ad_id=ad_id, enrol_number=str(ad_row["enrol_number"]), clip_id=ad_row["id"],
+                            platform=ad_row.get("platform", ""), start_frame=ad_row["start_frame"],
+                            end_frame=ad_row["end_frame"], response_time=None, confidence=0.0,
+                            ad_screenshot_paths=ad_row["ad_screenshot_paths"])
         try:
             if model is None:
-                login(hugg_key)
-                model = AutoModelForMultimodalLM.from_pretrained(
-                    MODEL, device_map="cuda:0", dtype="auto", attn_implementation="sdpa").eval()
-                processor = AutoProcessor.from_pretrained(MODEL)
-                print("Model loaded successfully.")
+                model, processor = load_annotation_model()
             response, response_time = qwen_call_round2(model, processor, ad_row)
 
             if not isinstance(response, dict):
@@ -269,62 +260,16 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
             response = validate_response(response, ad_id)
             all_responses.append({"ad_id": ad_id, "response": response})
 
-            result_entry = {
-                "ad_id": ad_id,
-                "enrol_number": str(ad_row["enrol_number"]),
-                "clip_id": ad_row["id"],
-                "platform": ad_row.get("platform", ""),
-                "start_frame": ad_row["start_frame"],
-                "end_frame": ad_row["end_frame"],
-                "food_ad_round1": ad_row.get("food_ad", ""),
-                "brands_round1": ad_row.get("brands", ""),
-                "response_time": round(response_time, 2),
-                # round 2 fields
-                "overall_category": response.get("overall_category", []),
-                "product_categories": response.get("product_categories", []),
-                "brand_business_categories": response.get("brand_business_categories", []),
-                "ad_relevance": response.get("ad_relevance", ""),
-                "brand_main": response.get("brand_main", ""),
-                "brand_other": response.get("brand_other", []),
-                "type_of_marketing": response.get("type_of_marketing", []),
-                "marketing_strategies": response.get("marketing_strategies", []),
-                "target_group": response.get("target_group", ""),
-                "who_category": response.get("who_category", []),
-                "nova_category": response.get("nova_category", ""),
-                "confidence": response.get("confidence", 0.0),
-            }
+            result_entry.update({field: response[field] for field in fields})
+            result_entry["response_time"] = round(response_time, 2)
 
         except Exception as e:
             import traceback
             print(f"Error processing ad {ad_id}: {e}")
             print(traceback.format_exc())
             all_responses.append({"ad_id": ad_id, "error": str(e)})
-            result_entry = {
-                "ad_id": ad_id,
-                "enrol_number": str(ad_row["enrol_number"]),
-                "clip_id": ad_row["id"],
-                "platform": ad_row.get("platform", ""),
-                "start_frame": ad_row["start_frame"],
-                "end_frame": ad_row["end_frame"],
-                "food_ad_round1": ad_row.get("food_ad", ""),
-                "brands_round1": ad_row.get("brands", ""),
-                "response_time": None,
-                "overall_category": None,
-                "product_categories": None,
-                "brand_business_categories": None,
-                "ad_relevance": None,
-                "brand_main": None,
-                "brand_other": None,
-                "type_of_marketing": None,
-                "marketing_strategies": None,
-                "target_group": None,
-                "who_category": None,
-                "nova_category": None,
-                "confidence": 0.0,
-                "error": str(e),
-            }
+            result_entry["error"] = str(e)
 
-        result_entry["ad_screenshot_paths"] = ad_row["ad_screenshot_paths"]
         results.append(result_entry)
         if "error" not in result_entry:
             processed_ids.add(ad_id)
@@ -342,7 +287,9 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
     save_results(final, output_path)
     save_json(all_responses, responses_path)
 
-    print(f"\nRound 2 complete. {len(results)} ads classified.")
+    errors = int(final.get("error", pd.Series(dtype=str)).fillna("").astype(str).str.strip().ne("").sum())
+    unclear = int(final.get("ad_relevance", pd.Series(dtype=str)).eq("UNSURE").sum())
+    print(f"\nRound 2: {len(final) - errors} successful results ({unclear} unsure), {errors} errors.")
     print(f"Results saved to {output_path}")
 
     return final, all_responses
@@ -356,15 +303,14 @@ if __name__ == "__main__":
     responses_path = os.path.join(AGGREGATED_DIR, "round2_responses.json")
 
     # load food ads
-    #food_ads_path = os.path.join(AGGREGATED_DIR, "food_ads_round2.xlsx")
     all_ads_path = os.path.join(AGGREGATED_DIR, "all_ads_round2.xlsx") # all ads
     if not os.path.exists(all_ads_path):
         print(f"ERROR: {all_ads_path} not found. Run aggregate.py first.")
         exit(1)
 
     all_ads = pd.read_excel(all_ads_path, dtype={"enrol_number": str})
-    if "frame_bounds_version" not in all_ads.columns or not all_ads["frame_bounds_version"].eq("exclusive_seconds_v1").all():
-        raise ValueError("Run aggregate.py again to rebuild the exclusive-end frame bounds")
+    if "frame_bounds_version" not in all_ads.columns or not all_ads["frame_bounds_version"].eq(FRAME_BOUNDS_VERSION).all():
+        raise ValueError("Rerun Round 1 with the inclusive-end prompt, then aggregate.py, before Round 2")
     print(f"Loaded {len(all_ads)} ads for round 2 classification.")
 
     if all_ads.empty:
@@ -374,6 +320,5 @@ if __name__ == "__main__":
     # run round 2
     results, responses = classify_food_ads(all_ads, None, None, output_path, responses_path)
 
-    print(f"\n{'='*50}")
-    print("Round 2 classification complete!")
-    print(f"{'='*50}")
+    if results.get("error", pd.Series(dtype=str)).fillna("").astype(str).str.strip().ne("").any():
+        raise SystemExit("Round 2 has failed ads; rerun the same command to retry them.")
