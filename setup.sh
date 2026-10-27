@@ -12,8 +12,9 @@
 # round2.py                 # round 2 (assess relevance and annotate food ads)
 
 # ===== AFTER ANNOTATION IS DONE =====
-# ad_similarity.py          # re-calculate screenshot similarity to detect missed ads (optional)
+# ad_similarity.py          # re-calculate screenshot similarity to detect missed ads (optional, between round 1 and round 2)
 # export_dieticians.py      # append AI annotations to the dieticians workbook
+# compare_runs.py           # compare different annotation runs to check for improvements
 
 # ===== TO PREPARE THE VALIDATION SAMPLE FOR DIETICIANS =====
 # dieticians_video.py       # create validation 1 set for the dieticians (just once)

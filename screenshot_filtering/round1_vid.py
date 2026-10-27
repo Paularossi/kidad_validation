@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 from screenshot_filtering.questions import instructions_video, parse_model_response, parse_qwen_json
 from PIL import Image, ImageOps
-from screenshot_filtering.helpers import (save_excel, save_json, load_participant, DATA_DIR, RESULTS_DIR, PLAYBACK_FPS, validate_intervals, FRAME_BOUNDS_VERSION, load_annotation_model)
+from screenshot_filtering.helpers import (save_excel, save_json, load_participant, DATA_DIR, RESULTS_DIR, PLAYBACK_FPS, validate_intervals, inclusive_frame_bounds, FRAME_BOUNDS_VERSION, load_annotation_model)
 
 
 @contextmanager
@@ -68,6 +68,9 @@ def qwen_call_video(model, processor, clip_meta):
         "Ignore any duplicated final frame used only for processing padding."
     )
     total_duration_sec = n_frames / PLAYBACK_FPS
+    if clip_meta.get("omit_signals"):
+        timing_text += (' Return "signals": [] with no explanation or brand list. '
+                        'Still inspect every frame and return all detected ad intervals before signals.')
 
     print(f'======== Labeling clip: {video_id} ({n_frames} frames, {total_duration_sec:.1f}s). ========\n')
 
@@ -209,11 +212,11 @@ def qwen_call_video(model, processor, clip_meta):
     return parse_round1_response(model, processor, raw_response), response_time
 
 
-def extract_round1_item(response, clip_id):
+def extract_round1_item(response, clip_id, n_frames=None):
     """Accept one result, identical copies, or a detached redundant empty ads object.
 
-    Preserve the raw response in the caller's response log. Never discard a second
-    distinct classification, nonempty intervals, unknown fields or conflicting content.
+    Keep one validated AD over same-clip NON_AD results with explicitly empty ads.
+    Preserve all original items and record this recovery in the response log.
     """
     items = response.get("items") if isinstance(response, dict) else None
     if (isinstance(items, list) and len(items) > 1
@@ -228,12 +231,90 @@ def extract_round1_item(response, clip_id):
                 and sum(item == {"ads": []} for item in items) == 1):
             print(f"Normalized response for {clip_id}: removed a redundant separate empty ads object.", flush=True)
             items = main
+    if (n_frames is not None and isinstance(items, list) and len(items) > 1
+            and all(isinstance(item, dict) and item.get("id") == clip_id for item in items)):
+        positive = [item for item in items if item.get("label") == "AD"]
+        negative = [item for item in items if item.get("label") == "NON_AD" and item.get("ads") == []]
+        if len(positive) == 1 and len(negative) == len(items) - 1:
+            validate_intervals(positive[0].get("ads", []), "AD", n_frames)
+            warning = "Kept one valid AD result over contradictory NON_AD results with empty intervals."
+            print(f"Warning for {clip_id}: {warning}", flush=True)
+            response["recovery_warning"] = warning
+            items = positive
     if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
         raise ValueError("Expected exactly one result object for the clip")
     return items[0]
 
 
-def filter_ads(media, model, processor):
+def checked_annotation(model, processor, med, responses):
+    elapsed = 0
+    for attempt in range(2):
+        request = med if attempt == 0 else {**med, "omit_signals": True}
+        response, duration = qwen_call_video(model, processor, request)
+        elapsed += duration
+        responses.append({"clip_id": med["clip_id"], "chunk_start_frame": med.get("chunk_start_frame"),
+                          "omit_signals": attempt == 1, "response": response})
+        if not isinstance(response, str):
+            break
+        if attempt == 0:
+            print(f"Unparseable response for {med['clip_id']}; retrying once with signals = [].", flush=True)
+    if isinstance(response, str):
+        raise ValueError(f"JSON parse failed, raw response: {response[:200]}")
+    item = extract_round1_item(response, med["clip_id"], med["n_frames"])
+    if item.get("id") != med["clip_id"]:
+        raise ValueError("Response clip ID does not match the input")
+    if item.get("label") not in {"AD", "NON_AD", "UNCLEAR"}:
+        raise ValueError("Invalid clip classification")
+    validate_intervals(item.get("ads", []), item["label"], med["n_frames"])
+    if not isinstance(item.get("signals", []), list):
+        raise ValueError("Invalid signals")
+    if not 0 <= float(item.get("confidence", -1)) <= 1:
+        raise ValueError("Invalid confidence")
+    return item, elapsed
+
+
+def annotate_chunks(model, processor, med, responses):
+    """40-frame windows, sharing one frame; only shared AD frames join intervals."""
+    bounds, items = [], []
+    elapsed = 0
+    starts = list(range(0, max(1, med["n_frames"] - 1), 39))
+    for number, start in enumerate(starts, 1):
+        paths = med["screenshot_paths"][start:start + 40]
+        chunk = {**med, "screenshot_paths": paths, "n_frames": len(paths), "chunk_start_frame": start}
+        print(f"  Chunk {number}/{len(starts)}: original screenshots {start + 1}-{start + len(paths)}", flush=True)
+        item, duration = checked_annotation(model, processor, chunk, responses)
+        if item["label"] == "UNCLEAR":
+            raise ValueError(f"Chunk {number} is UNCLEAR; clip remains unresolved")
+        current = sorted((a + start, b + start) for a, b in (
+            inclusive_frame_bounds(ad["start_sec"], ad["end_sec"], len(paths))
+            for ad in item.get("ads", [])))
+        if number > 1:
+            previous_ad = bool(bounds and bounds[-1][1] == start)
+            current_ad = bool(current and current[0][0] == start)
+            if previous_ad != current_ad:
+                warning = (f"Chunk boundary disagreement at original screenshot {start + 1}; "
+                           "retained AD detection without merging across this boundary")
+                print(f"Warning for {med['clip_id']}: {warning}", flush=True)
+                responses.append({"clip_id": med["clip_id"], "boundary_screenshot_position": start + 1,
+                                  "warning": warning})
+        for first, last in current:
+            if bounds and first <= bounds[-1][1]:
+                bounds[-1] = (bounds[-1][0], last)
+            else:
+                bounds.append((first, last))
+        items.append(item)
+        elapsed += duration
+    platforms = {item.get("platform", "UNKNOWN") for item in items}
+    combined = dict(id=med["clip_id"], label="AD" if bounds else "NON_AD",
+                    platform=next(iter(platforms)) if len(platforms) == 1 else "UNCLEAR",
+                    confidence=min(float(item["confidence"]) for item in items),
+                    signals=list(dict.fromkeys(signal for item in items for signal in item.get("signals", []))),
+                    ads=[dict(start_sec=a / PLAYBACK_FPS, end_sec=b / PLAYBACK_FPS) for a, b in bounds])
+    validate_intervals(combined["ads"], combined["label"], med["n_frames"])
+    return combined, elapsed
+
+
+def filter_ads(media, model, processor, retry_ids=()):
     """
     media: list of dicts from load_participant
     (has video_path, clip_id, n_frames, screenshot_paths, start_time, end_time)
@@ -245,17 +326,19 @@ def filter_ads(media, model, processor):
     for med in media:
         print(f"Processing video {n}/{len(media)}")
         try:
-            response, response_time = qwen_call_video(model, processor, med)
-            responses.append(response)
-
-            if isinstance(response, str):
-                raise ValueError(f"JSON parse failed, raw response: {response[:200]}")
-
-            item = extract_round1_item(response, med["clip_id"])
-            if item.get("id") != med["clip_id"]:
-                raise ValueError("Response clip ID does not match the input")
-            if item.get("label") not in {"AD", "NON_AD", "UNCLEAR"}:
-                raise ValueError("Invalid clip classification")
+            if med["clip_id"] in retry_ids:
+                print("Retrying saved unresolved clip in overlapping chunks.", flush=True)
+                item, response_time = annotate_chunks(model, processor, med, responses)
+            else:
+                try:
+                    item, response_time = checked_annotation(model, processor, med, responses)
+                    if item["label"] == "UNCLEAR":
+                        raise ValueError("Whole clip is UNCLEAR")
+                except Exception as error:
+                    print(f"Whole-clip annotation failed: {error}. Trying overlapping chunks.", flush=True)
+                    responses.append({"clip_id": med["clip_id"], "whole_clip_error": str(error)})
+                    item, response_time = annotate_chunks(model, processor, med, responses)
+            responses.append({"items": [item]})
             ads = validate_intervals(item.get("ads", []), item["label"], med["n_frames"])
             signals = item.get("signals", [])
             label = item["label"]
@@ -370,18 +453,21 @@ def main():
             os.makedirs(participant_dir, exist_ok=True)
             existing = saved_round1(os.path.join(participant_dir, "results.xlsx"), clips)
             completed = set(existing["id"]) if not existing.empty else set()
+            saved_path = os.path.join(participant_dir, "results.xlsx")
+            retry_ids = set(pd.read_excel(saved_path)["id"]) - completed if os.path.exists(saved_path) else set()
             pending = [clip for clip in clips if clip["clip_id"] not in completed]
             responses_path = os.path.join(participant_dir, "responses.json")
             responses = []
             if os.path.exists(responses_path):
                 with open(responses_path, encoding="utf-8") as stream:
                     responses = json.load(stream)
-                responses = [r for r in responses if isinstance(r, dict) and r.get("items")
-                             and r["items"][0].get("id") in completed]
+                responses = [r for r in responses if isinstance(r, dict) and
+                             (r.get("clip_id") in completed or
+                              (r.get("items") and r["items"][0].get("id") in completed))]
             if pending:
                 if model is None:
                     model, processor = load_annotation_model()
-                results, new_responses = filter_ads(pending, model, processor)
+                results, new_responses = filter_ads(pending, model, processor, retry_ids)
                 results = pd.concat([existing, results], ignore_index=True)
                 responses.extend(new_responses)
             else:

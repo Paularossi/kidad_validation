@@ -26,7 +26,7 @@ FIELDS = ['overall_category', 'product_categories', 'brand_business_categories',
           'brand_main', 'brand_other', 'type_of_marketing', 'marketing_strategies',
           'target_group', 'who_category', 'nova_category', 'confidence']
 HEADERS = ['AI clip ID', 'AI ad detected', 'AI ad group ID', 'AI relevance',
-           'AI processing status'] + ['AI ' + field for field in FIELDS]
+           'AI processing status', 'AI round1 confidence'] + ['AI ' + field for field in FIELDS]
 
 
 def identifier(value):
@@ -114,6 +114,9 @@ def annotation(key, lookup):
         out['AI processing status'] = 'ROUND1_MISSING'
         return out
     label = clip.get('label')
+    # round 1 confidence (clip-wise)
+    if not clip.get('error') and label in {'AD', 'NON_AD', 'UNCLEAR'}:
+        out['AI round1 clip confidence'] = clip.get('confidence', '')
     if clip.get('error') or label not in {'AD', 'NON_AD'}:
         out['AI ad detected'] = 'UNCLEAR' if label == 'UNCLEAR' else ''
         out['AI processing status'] = 'ROUND1_UNCLEAR' if label == 'UNCLEAR' else 'ROUND1_FAILED'

@@ -57,9 +57,12 @@ instructions_video = """
 
     --------------------------------------------------
     OUTPUT FORMAT (strict JSON, one line):
-    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD|UNCLEAR","confidence":0.0,"signals":["..."],"ads":[{"start_sec":0.0,"end_sec":0.0}]}]}
+    {"items":[{"id":"<id>","platform":"Instagram|Facebook|TikTok|Snapchat|Twitter/X|YouTube|Pinterest|UNCLEAR|NOT_APPLICABLE","label":"AD|NON_AD|UNCLEAR","confidence":0.0,"ads":[{"start_sec":0.0,"end_sec":0.0}],"signals":["..."]}]}
 
     Only include "ads" when label is AD; omit it otherwise.
+    Write all ad intervals BEFORE "signals". Put "signals" last and include at most THREE short pieces of observed evidence, each at most 12 words.
+    Do not produce exhaustive brand/product lists or enumerate possible brand/product combinations. The signal limit does not limit the number of ad intervals.
+    If the user requests signals = [], return an empty signals array without explanations; still inspect all frames and return all detected ad intervals.
     For AD with multiple distinct ads, list each as a separate entry in the "ads" array with its own start_sec and end_sec. AD requires at least one interval.
     Brand/ad evidence visible or explicitly mentioned in readable text in at least one frame is sufficient. Keep uncertainty about the exact brand identity separate from evidence that advertising is present.
     Output JSON ONLY.

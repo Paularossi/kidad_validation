@@ -65,7 +65,7 @@ def qwen_call_round2(model, processor, ad_row):
     messages = [
         {"role": "system", "content": [{"type": "text", "text": instructions_round2}]},
         {"role": "user", "content": [
-                {"type": "text", "text": f"ID: {ad_id}"},
+                {"type": "text", "text": f"ID: {ad_id}" + ad_row.get("validation_feedback", "")},
                 media_content,
             ],
         },
@@ -179,6 +179,42 @@ def save_results(data, path):
                 row[0].number_format = "@"
 
 
+def checked_round2(model, processor, ad_row, ad_id, logs):
+    """Bind each synchronous response to its input; retry invalid annotations once."""
+    elapsed = 0
+    request = ad_row
+    for attempt in range(2):
+        raw, duration = qwen_call_round2(model, processor, request)
+        elapsed += duration
+        entry = {"ad_id": ad_id, "attempt": attempt + 1, "raw_response": raw}
+        logs.append(entry)
+        try:
+            if not isinstance(raw, dict):
+                raise ValueError("Response must be a JSON object")
+            # this call contains exactly one known ad. IDs are bookkeeping, not predictions.
+            response = {**raw, "id": ad_id}
+            if raw.get("id") != ad_id:
+                entry["warning"] = "Used input ad ID instead of missing/mismatched model ID"
+                print(f"Warning for {ad_id}: {entry['warning']}", flush=True)
+            response = validate_response(response, ad_id)
+            entry["response"] = response
+            return response, elapsed
+        except ValueError as error:
+            entry["validation_error"] = str(error)
+            if attempt == 1:
+                raise
+            print(f"Invalid annotation for {ad_id}: {error}. Rechecking images once.", flush=True)
+            request = ad_row.copy()
+            request["validation_feedback"] = (
+                f"\nThe previous response failed validation: {error}. "
+                "Reinspect the supplied images and return one complete corrected annotation. "
+                "Check product/business categories BEFORE deciding relevance. RETAILER is restricted "
+                "to food/beverage retailers, not all shops. Do not change relevance to YES merely "
+                "to resolve a contradiction; correct whichever classification the images do not support. "
+                "If relevant, fill all required detail fields; otherwise follow the skip rules."
+            )
+
+
 
 def classify_food_ads(food_ads_df, model, processor, output_path, responses_path):
     """Loop through all food ads and classify them."""
@@ -252,13 +288,7 @@ def classify_food_ads(food_ads_df, model, processor, output_path, responses_path
         try:
             if model is None:
                 model, processor = load_annotation_model()
-            response, response_time = qwen_call_round2(model, processor, ad_row)
-
-            if not isinstance(response, dict):
-                raise ValueError(f"JSON parsing failed or returned the wrong type: {str(response)[:200]}")
-
-            response = validate_response(response, ad_id)
-            all_responses.append({"ad_id": ad_id, "response": response})
+            response, response_time = checked_round2(model, processor, ad_row, ad_id, all_responses)
 
             result_entry.update({field: response[field] for field in fields})
             result_entry["response_time"] = round(response_time, 2)
