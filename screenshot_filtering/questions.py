@@ -132,7 +132,8 @@ instructions_round2 = """
     Rules:
     - Use readable names, logos, packaging and text mentions. Colors, shapes and licensed characters are supporting evidence, not sufficient grounds for guessing.
     - Write brand names exactly as they appear
-    - Do NOT guess brands
+    - Do NOT guess brands. Do NOT hallucinate brand names.
+    - If a brand is present, but you cannot identify it clearly: brand_main = "UNCLEAR", brand_other = []
     - If no brand can be identified visually or from readable text: brand_main = "", brand_other = []
 
     --------------------------------------------------
